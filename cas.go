@@ -104,22 +104,22 @@ type PrincipalRole struct {
 	ManageChildTenant bool
 }
 
-func (pr *PrincipalRole) IsExpired() bool {
+func (pr *PrincipalRole) IsExpired(clock Clock) bool {
 	if pr.Expiry == nil {
 		return false
 	}
-	return time.Now().After(*pr.Expiry)
+	return clock.Now().After(*pr.Expiry)
 }
 
-func (pr *PrincipalRole) SetExpiry(expiry time.Time) error {
-	if expiry.Before(time.Now()) {
+func (pr *PrincipalRole) SetExpiry(expiry time.Time, clock Clock) error {
+	if expiry.Before(clock.Now()) {
 		return fmt.Errorf("expiry time has to be in future")
 	}
 	pr.Expiry = &expiry
 	return nil
 }
 
-func (pr *PrincipalRole) SetExpiryDuration(dur any) error {
+func (pr *PrincipalRole) SetExpiryDuration(dur any, clock Clock) error {
 	var duration time.Duration
 	var err error
 	switch d := dur.(type) {
@@ -133,7 +133,7 @@ func (pr *PrincipalRole) SetExpiryDuration(dur any) error {
 	default:
 		return fmt.Errorf("unsupported duration type")
 	}
-	expiry := time.Now().Add(duration)
+	expiry := clock.Now().Add(duration)
 	pr.Expiry = &expiry
 	return nil
 }
@@ -155,15 +155,36 @@ func (p Request) String() string {
 	return p.Resource + " " + p.Action
 }
 
+type Clock interface {
+	Now() time.Time
+}
+
+type RealClock struct{}
+
+func (RealClock) Now() time.Time {
+	return time.Now()
+}
+
+type cacheKey struct {
+	UserID    string
+	TenantID  string
+	Namespace string
+	Scope     string
+}
+
 type Authorizer struct {
-	roleDAG       *RoleDAG
-	userRoles     []*PrincipalRole
-	userRoleMap   map[string]map[string][]*PrincipalRole
-	tenants       map[string]*Tenant
-	parentCache   map[string]*Tenant
-	defaultTenant string
-	auditLog      *slog.Logger
-	m             sync.RWMutex
+	roleDAG          *RoleDAG
+	userRoles        []*PrincipalRole
+	userRoleMap      map[string]map[string][]*PrincipalRole
+	tenants          map[string]*Tenant
+	parentCache      map[string]*Tenant
+	defaultTenant    string
+	auditLog         *slog.Logger
+	clock            Clock
+	m                sync.RWMutex
+	permissionsCache map[cacheKey]map[string]struct{}
+	rolesCache       map[cacheKey]map[string]struct{}
+	cacheLock        sync.RWMutex
 }
 
 func NewAuthorizer(auditLog ...*slog.Logger) *Authorizer {
@@ -172,11 +193,14 @@ func NewAuthorizer(auditLog ...*slog.Logger) *Authorizer {
 		logger = auditLog[0]
 	}
 	return &Authorizer{
-		roleDAG:     NewRoleDAG(),
-		tenants:     make(map[string]*Tenant),
-		parentCache: make(map[string]*Tenant),
-		userRoleMap: make(map[string]map[string][]*PrincipalRole),
-		auditLog:    logger,
+		roleDAG:          NewRoleDAG(),
+		tenants:          make(map[string]*Tenant),
+		parentCache:      make(map[string]*Tenant),
+		userRoleMap:      make(map[string]map[string][]*PrincipalRole),
+		auditLog:         logger,
+		clock:            RealClock{},
+		permissionsCache: make(map[cacheKey]map[string]struct{}),
+		rolesCache:       make(map[cacheKey]map[string]struct{}),
 	}
 }
 
@@ -197,52 +221,35 @@ func (a *Authorizer) AddPrincipalRole(userRole ...*PrincipalRole) {
 }
 
 func (a *Authorizer) RemovePrincipalRole(target PrincipalRole) error {
-	// rebuild roles without matching role
-	var updatedRoles []*PrincipalRole
-	var rolesRemoved bool
-	matches := func(pr *PrincipalRole) bool {
-		if target.Principal != "" && pr.Principal != target.Principal {
-			return false
-		}
-		if target.Tenant != "" && pr.Tenant != target.Tenant {
-			return false
-		}
-		if target.Namespace != "" && pr.Namespace != target.Namespace {
-			return false
-		}
-		if target.Scope != "" && pr.Scope != target.Scope {
-			return false
-		}
-		if target.Role != "" && pr.Role != target.Role {
-			return false
-		}
-		return true
-	}
-	for _, ur := range a.userRoles {
-		if matches(ur) {
+	a.m.Lock()
+	defer a.m.Unlock()
+	// Optimize by directly modifying slices and maps
+	rolesRemoved := false
+	for i := 0; i < len(a.userRoles); {
+		if matches(&target, a.userRoles[i]) {
 			rolesRemoved = true
-			continue
+			a.userRoles = append(a.userRoles[:i], a.userRoles[i+1:]...)
+		} else {
+			i++
 		}
-		updatedRoles = append(updatedRoles, ur)
 	}
 	if !rolesRemoved {
 		return fmt.Errorf("no matching roles found for the provided criteria")
 	}
-	a.userRoles = updatedRoles
-	// ...existing code to update a.userRoleMap...
+	// Update userRoleMap
 	for principal, tenants := range a.userRoleMap {
 		for tenantID, roles := range tenants {
-			var updatedTenantRoles []*PrincipalRole
-			for _, ur := range roles {
-				if matches(ur) {
-					continue
+			for i := 0; i < len(roles); {
+				if matches(&target, roles[i]) {
+					roles = append(roles[:i], roles[i+1:]...)
+				} else {
+					i++
 				}
-				updatedTenantRoles = append(updatedTenantRoles, ur)
 			}
-			if len(updatedTenantRoles) == 0 {
+			if len(roles) == 0 {
 				delete(tenants, tenantID)
 			} else {
-				tenants[tenantID] = updatedTenantRoles
+				tenants[tenantID] = roles
 			}
 		}
 		if len(tenants) == 0 {
@@ -250,6 +257,26 @@ func (a *Authorizer) RemovePrincipalRole(target PrincipalRole) error {
 		}
 	}
 	return nil
+}
+
+// Helper function for matching roles
+func matches(target, role *PrincipalRole) bool {
+	if target.Principal != "" && target.Principal != role.Principal {
+		return false
+	}
+	if target.Tenant != "" && target.Tenant != role.Tenant {
+		return false
+	}
+	if target.Namespace != "" && target.Namespace != role.Namespace {
+		return false
+	}
+	if target.Scope != "" && target.Scope != role.Scope {
+		return false
+	}
+	if target.Role != "" && target.Role != role.Role {
+		return false
+	}
+	return true
 }
 
 var (
@@ -265,33 +292,37 @@ func (a *Authorizer) GetDefaultTenant() (*Tenant, bool) {
 	return nil, false
 }
 
+// Optimized resolvePrincipalPermissions with caching
 func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, scopeName string) (map[string]struct{}, error) {
+	key := cacheKey{UserID: userID, TenantID: tenantID, Namespace: namespace, Scope: scopeName}
+
+	// Check cache
+	a.cacheLock.RLock()
+	if cached, found := a.permissionsCache[key]; found {
+		a.cacheLock.RUnlock()
+		return cached, nil
+	}
+	a.cacheLock.RUnlock()
+
+	// Compute permissions
+	a.m.RLock()
+	defer a.m.RUnlock()
 	tenant, exists := a.tenants[tenantID]
 	if !exists {
 		return nil, fmt.Errorf("invalid tenant: %v", tenantID)
 	}
-	globalPermissions := globalPermissionsPool.Get()
-	scopedPermissions := scopedPermissionsPool.Get()
-	checkedTenants := checkedTenantsPool.Get()
-	clear(scopedPermissions)
-	clear(globalPermissions)
-	clear(checkedTenants)
-	defer func() {
-		scopedPermissionsPool.Put(scopedPermissions)
-		globalPermissionsPool.Put(globalPermissions)
-		checkedTenantsPool.Put(checkedTenants)
-	}()
+	globalPermissions := make(map[string]struct{})
+	scopedPermissions := make(map[string]struct{})
+	checkedTenants := make(map[string]bool)
+
 	var traverse func(current *Tenant) error
 	traverse = func(current *Tenant) error {
 		if checkedTenants[current.ID] {
 			return nil
 		}
 		checkedTenants[current.ID] = true
-		for _, userRole := range a.userRoles {
-			if userRole.Principal != userID || userRole.Tenant != current.ID {
-				continue
-			}
-			if userRole.IsExpired() {
+		for _, userRole := range a.userRoleMap[userID][current.ID] {
+			if userRole.IsExpired(a.clock) {
 				continue
 			}
 			if userRole.Namespace == "" || userRole.Namespace == namespace {
@@ -307,8 +338,8 @@ func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, sc
 				}
 			}
 		}
-		for _, userRole := range a.userRoles {
-			if userRole.Principal == userID && userRole.Tenant == current.ID && userRole.ManageChildTenant {
+		for _, userRole := range a.userRoleMap[userID][current.ID] {
+			if userRole.ManageChildTenant {
 				for _, child := range current.ChildTenants {
 					if err := traverse(child); err != nil {
 						return err
@@ -321,39 +352,51 @@ func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, sc
 	if err := traverse(tenant); err != nil {
 		return nil, err
 	}
+
+	// Cache the result
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
 	if len(scopedPermissions) > 0 {
+		a.permissionsCache[key] = scopedPermissions
 		return scopedPermissions, nil
 	}
 	if len(globalPermissions) > 0 {
+		a.permissionsCache[key] = globalPermissions
 		return globalPermissions, nil
 	}
 	return nil, fmt.Errorf("no roleDAG or permissions found")
 }
 
+// Optimized resolvePrincipalRoles with caching
 func (a *Authorizer) resolvePrincipalRoles(userID, tenantID, namespace string) (map[string]struct{}, error) {
+	key := cacheKey{UserID: userID, TenantID: tenantID, Namespace: namespace}
+
+	// Check cache
+	a.cacheLock.RLock()
+	if cached, found := a.rolesCache[key]; found {
+		a.cacheLock.RUnlock()
+		return cached, nil
+	}
+	a.cacheLock.RUnlock()
+
+	// Compute roles
+	a.m.RLock()
+	defer a.m.RUnlock()
 	tenant, exists := a.tenants[tenantID]
 	if !exists {
 		return nil, fmt.Errorf("invalid tenant: %v", tenantID)
 	}
-	scopedRoles := scopedPermissionsPool.Get()
-	checkedTenants := checkedTenantsPool.Get()
-	clear(scopedRoles)
-	clear(checkedTenants)
-	defer func() {
-		scopedPermissionsPool.Put(scopedRoles)
-		checkedTenantsPool.Put(checkedTenants)
-	}()
+	scopedRoles := make(map[string]struct{})
+	checkedTenants := make(map[string]bool)
+
 	var traverse func(current *Tenant) error
 	traverse = func(current *Tenant) error {
 		if checkedTenants[current.ID] {
 			return nil
 		}
 		checkedTenants[current.ID] = true
-		for _, userRole := range a.userRoles {
-			if userRole.Principal != userID || userRole.Tenant != current.ID {
-				continue
-			}
-			if userRole.IsExpired() {
+		for _, userRole := range a.userRoleMap[userID][current.ID] {
+			if userRole.IsExpired(a.clock) {
 				continue
 			}
 			if (userRole.Namespace == "" || userRole.Namespace == namespace) && userRole.Role != "" {
@@ -363,8 +406,8 @@ func (a *Authorizer) resolvePrincipalRoles(userID, tenantID, namespace string) (
 				}
 			}
 		}
-		for _, userRole := range a.userRoles {
-			if userRole.Principal == userID && userRole.Tenant == current.ID && userRole.ManageChildTenant {
+		for _, userRole := range a.userRoleMap[userID][current.ID] {
+			if userRole.ManageChildTenant {
 				for _, child := range current.ChildTenants {
 					if err := traverse(child); err != nil {
 						return err
@@ -377,10 +420,27 @@ func (a *Authorizer) resolvePrincipalRoles(userID, tenantID, namespace string) (
 	if err := traverse(tenant); err != nil {
 		return nil, err
 	}
-	if len(scopedRoles) > 0 {
-		return scopedRoles, nil
+
+	// Cache the result
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	a.rolesCache[key] = scopedRoles
+	return scopedRoles, nil
+}
+
+// Optimized findTargetTenants to avoid unnecessary slice copy
+func (a *Authorizer) findTargetTenants(request Request) ([]*Tenant, bool) {
+	if request.Tenant == "" && a.defaultTenant != "" {
+		request.Tenant = a.defaultTenant
 	}
-	return nil, fmt.Errorf("no roleDAG or permissions found")
+	if request.Tenant == "" {
+		return a.findPrincipalTenants(request.Principal), true
+	}
+	tenant, exists := a.tenants[request.Tenant]
+	if !exists {
+		return nil, false
+	}
+	return []*Tenant{tenant}, true
 }
 
 func (a *Authorizer) Log(level slog.Level, request Request, msg string) {
@@ -406,34 +466,6 @@ func (a *Authorizer) Log(level slog.Level, request Request, msg string) {
 		}
 		a.auditLog.Log(context.Background(), level, msg, args...)
 	}
-}
-
-func (a *Authorizer) findTargetTenants(request Request) ([]*Tenant, bool) {
-	if request.Tenant == "" && a.defaultTenant != "" {
-		request.Tenant = a.defaultTenant
-	}
-	var tenantBuffer [10]*Tenant
-	var targetTenants []*Tenant
-	tenantCount := 0
-	if request.Tenant == "" {
-		tenants := a.findPrincipalTenants(request.Principal)
-		tenantCount = len(tenants)
-		if tenantCount <= len(tenantBuffer) {
-			copy(tenantBuffer[:], tenants)
-			targetTenants = tenantBuffer[:tenantCount]
-		} else {
-			targetTenants = tenants
-		}
-	} else {
-		tenant, exists := a.tenants[request.Tenant]
-		if !exists {
-			return nil, false
-		}
-		tenantBuffer[0] = tenant
-		tenantCount = 1
-		targetTenants = tenantBuffer[:tenantCount]
-	}
-	return targetTenants, true
 }
 
 func (a *Authorizer) Can(request Request, roles ...string) bool {
