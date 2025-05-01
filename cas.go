@@ -12,6 +12,10 @@ import (
 	"github.com/oarflow/cas/utils"
 )
 
+//
+
+//
+
 type Permission struct {
 	Resource string
 	Action   string
@@ -99,6 +103,17 @@ func NewTenant(id string, defaultNamespace ...string) *Tenant {
 	}
 }
 
+func (t *Tenant) getDescendantIDs() []string {
+	t.m.RLock()
+	defer t.m.RUnlock()
+	var ids []string
+	for _, child := range t.ChildTenants {
+		ids = append(ids, child.ID)
+		ids = append(ids, child.getDescendantIDs()...)
+	}
+	return ids
+}
+
 type PrincipalRole struct {
 	Principal         string
 	Tenant            string
@@ -177,22 +192,204 @@ type cacheKey struct {
 	Scope     string
 }
 
+type LRUCache struct {
+	data      map[cacheKey]*CacheEntry
+	order     []cacheKey
+	capacity  int
+	ttl       time.Duration
+	cacheLock sync.Mutex
+}
+
+type CacheEntry struct {
+	Value      map[string]struct{}
+	Expiration time.Time
+}
+
+func NewLRUCache(capacity int, ttl time.Duration) *LRUCache {
+	return &LRUCache{
+		data:     make(map[cacheKey]*CacheEntry),
+		order:    make([]cacheKey, 0, capacity),
+		capacity: capacity,
+		ttl:      ttl,
+	}
+}
+
+func (c *LRUCache) Get(key cacheKey) (map[string]struct{}, bool) {
+	c.cacheLock.Lock()
+	defer c.cacheLock.Unlock()
+	entry, exists := c.data[key]
+	if !exists || time.Now().After(entry.Expiration) {
+		return nil, false
+	}
+	c.moveToEnd(key)
+	return entry.Value, true
+}
+
+func (c *LRUCache) Put(key cacheKey, value map[string]struct{}) {
+	c.cacheLock.Lock()
+	defer c.cacheLock.Unlock()
+	if len(c.data) >= c.capacity {
+		oldest := c.order[0]
+		c.order = c.order[1:]
+		delete(c.data, oldest)
+	}
+	c.data[key] = &CacheEntry{Value: value, Expiration: time.Now().Add(c.ttl)}
+	c.order = append(c.order, key)
+}
+
+func (c *LRUCache) moveToEnd(key cacheKey) {
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, key)
+			break
+		}
+	}
+}
+
+type RoleDAG struct {
+	mu            sync.RWMutex
+	roles         map[string]*Role
+	edges         map[string][]string
+	resolved      map[string]map[string]struct{}
+	resolvedRoles map[string]map[string]struct{}
+}
+
+func NewRoleDAG() *RoleDAG {
+	return &RoleDAG{
+		roles:         make(map[string]*Role),
+		edges:         make(map[string][]string),
+		resolved:      make(map[string]map[string]struct{}),
+		resolvedRoles: make(map[string]map[string]struct{}),
+	}
+}
+
+func (dag *RoleDAG) AddRole(roles ...*Role) {
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	for _, role := range roles {
+		dag.roles[role.Name] = role
+	}
+	dag.resolved = make(map[string]map[string]struct{})
+	dag.resolvedRoles = make(map[string]map[string]struct{})
+}
+
+func (dag *RoleDAG) AddChildRole(parent string, child ...string) error {
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	if err := dag.checkCircularDependency(parent, child...); err != nil {
+		return err
+	}
+	dag.edges[parent] = append(dag.edges[parent], child...)
+	dag.resolved = make(map[string]map[string]struct{})
+	dag.resolvedRoles = make(map[string]map[string]struct{})
+	return nil
+}
+
+func (dag *RoleDAG) checkCircularDependency(parent string, children ...string) error {
+	visited := map[string]bool{parent: true}
+	var dfs func(string) bool
+	dfs = func(role string) bool {
+		if visited[role] {
+			return true
+		}
+		visited[role] = true
+		for _, child := range dag.edges[role] {
+			if dfs(child) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, child := range children {
+		if dfs(child) {
+			return fmt.Errorf("circular role dependency detected: %s -> %s", parent, child)
+		}
+	}
+	return nil
+}
+
+func (dag *RoleDAG) ResolvePermissions(roleName string) map[string]struct{} {
+	dag.mu.RLock()
+	if permissions, found := dag.resolved[roleName]; found {
+		dag.mu.RUnlock()
+		return permissions
+	}
+	dag.mu.RUnlock()
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	visited := make(map[string]bool)
+	queue := []string{roleName}
+	result := make(map[string]struct{})
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
+		role, exists := dag.roles[current]
+		if !exists {
+			continue
+		}
+		for perm := range role.Permissions {
+			result[perm] = struct{}{}
+		}
+		queue = append(queue, dag.edges[current]...)
+	}
+	dag.resolved[roleName] = result
+	return result
+}
+
+func (dag *RoleDAG) ResolveChildRoles(roleName string) map[string]struct{} {
+	dag.mu.RLock()
+	if roles, found := dag.resolvedRoles[roleName]; found {
+		dag.mu.RUnlock()
+		return roles
+	}
+	dag.mu.RUnlock()
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	visited := make(map[string]bool)
+	queue := []string{roleName}
+	result := make(map[string]struct{})
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if visited[current] {
+			continue
+		}
+		visited[current] = true
+		role, exists := dag.roles[current]
+		if !exists {
+			continue
+		}
+		result[role.Name] = struct{}{}
+		queue = append(queue, dag.edges[current]...)
+	}
+	dag.resolvedRoles[roleName] = result
+	return result
+}
+
 type ABACFunc func(request Request, attributes map[string]any) (allow bool, err error)
 
 type Authorizer struct {
-	roleDAG       *RoleDAG
-	userRoles     []*PrincipalRole
-	userRoleMap   map[string]map[string][]*PrincipalRole
-	tenants       map[string]*Tenant
-	parentCache   map[string]*Tenant
-	defaultTenant string
-	auditLog      *slog.Logger
-	clock         Clock
-	m             sync.RWMutex
-	cacheLock     sync.RWMutex
-	abacHooks     []ABACFunc
-	permCache     *LRUCache
-	roleCache     *LRUCache
+	roleDAG            *RoleDAG
+	userRoles          []*PrincipalRole
+	userRoleMap        map[string]map[string][]*PrincipalRole
+	tenants            map[string]*Tenant
+	parentCache        map[string]*Tenant
+	defaultTenant      string
+	auditLog           *slog.Logger
+	clock              Clock
+	m                  sync.RWMutex
+	cacheLock          sync.RWMutex
+	abacHooks          []ABACFunc
+	permCache          *LRUCache
+	roleCache          *LRUCache
+	effectiveRoleCache map[cacheKey]map[string]struct{}
+	effectivePermCache map[cacheKey]map[string]struct{}
+	effectiveCacheLock sync.RWMutex
 }
 
 func NewAuthorizer(auditLog ...*slog.Logger) *Authorizer {
@@ -201,14 +398,16 @@ func NewAuthorizer(auditLog ...*slog.Logger) *Authorizer {
 		logger = auditLog[0]
 	}
 	return &Authorizer{
-		roleDAG:     NewRoleDAG(),
-		tenants:     make(map[string]*Tenant),
-		parentCache: make(map[string]*Tenant),
-		userRoleMap: make(map[string]map[string][]*PrincipalRole),
-		auditLog:    logger,
-		clock:       RealClock{},
-		permCache:   NewLRUCache(1000, 5*time.Minute),
-		roleCache:   NewLRUCache(1000, 5*time.Minute),
+		roleDAG:            NewRoleDAG(),
+		tenants:            make(map[string]*Tenant),
+		parentCache:        make(map[string]*Tenant),
+		userRoleMap:        make(map[string]map[string][]*PrincipalRole),
+		auditLog:           logger,
+		clock:              RealClock{},
+		permCache:          NewLRUCache(1000, 5*time.Minute),
+		roleCache:          NewLRUCache(1000, 5*time.Minute),
+		effectiveRoleCache: make(map[cacheKey]map[string]struct{}),
+		effectivePermCache: make(map[cacheKey]map[string]struct{}),
 	}
 }
 
@@ -220,6 +419,38 @@ func (a *Authorizer) SetDefaultTenant(tenant string) {
 	a.defaultTenant = tenant
 }
 
+func (a *Authorizer) updateEffectiveCachesForRole(pr *PrincipalRole) {
+	effectiveTenantIDs := []string{pr.Tenant}
+	if pr.ManageChildTenant {
+		a.m.RLock()
+		if tenant, ok := a.tenants[pr.Tenant]; ok {
+			effectiveTenantIDs = append(effectiveTenantIDs, tenant.getDescendantIDs()...)
+		}
+		a.m.RUnlock()
+	}
+	for _, tid := range effectiveTenantIDs {
+		key := cacheKey{
+			UserID:    pr.Principal,
+			TenantID:  tid,
+			Namespace: pr.Namespace,
+			Scope:     pr.Scope,
+		}
+		a.effectiveCacheLock.Lock()
+		if a.effectiveRoleCache[key] == nil {
+			a.effectiveRoleCache[key] = make(map[string]struct{})
+		}
+		a.effectiveRoleCache[key][pr.Role] = struct{}{}
+		perms := a.roleDAG.ResolvePermissions(pr.Role)
+		if a.effectivePermCache[key] == nil {
+			a.effectivePermCache[key] = make(map[string]struct{})
+		}
+		for perm := range perms {
+			a.effectivePermCache[key][perm] = struct{}{}
+		}
+		a.effectiveCacheLock.Unlock()
+	}
+}
+
 func (a *Authorizer) AddPrincipalRole(userRole ...*PrincipalRole) {
 	a.m.Lock()
 	defer a.m.Unlock()
@@ -229,6 +460,17 @@ func (a *Authorizer) AddPrincipalRole(userRole ...*PrincipalRole) {
 			a.userRoleMap[ur.Principal] = make(map[string][]*PrincipalRole)
 		}
 		a.userRoleMap[ur.Principal][ur.Tenant] = append(a.userRoleMap[ur.Principal][ur.Tenant], ur)
+		a.updateEffectiveCachesForRole(ur)
+	}
+}
+
+func (a *Authorizer) rebuildEffectiveCaches() {
+	a.effectiveCacheLock.Lock()
+	defer a.effectiveCacheLock.Unlock()
+	a.effectiveRoleCache = make(map[cacheKey]map[string]struct{})
+	a.effectivePermCache = make(map[cacheKey]map[string]struct{})
+	for _, pr := range a.userRoles {
+		a.updateEffectiveCachesForRole(pr)
 	}
 }
 
@@ -259,13 +501,14 @@ func (a *Authorizer) RemovePrincipalRole(target PrincipalRole) error {
 			if len(roles) == 0 {
 				delete(tenants, tenantID)
 			} else {
-				tenants[tenantID] = roles
+				a.userRoleMap[principal][tenantID] = roles
 			}
 		}
 		if len(tenants) == 0 {
 			delete(a.userRoleMap, principal)
 		}
 	}
+	a.rebuildEffectiveCaches()
 	return nil
 }
 
@@ -303,6 +546,12 @@ func (a *Authorizer) GetDefaultTenant() (*Tenant, bool) {
 
 func (a *Authorizer) ResolvePrincipalPermissions(userID, tenantID, namespace, scopeName string) (map[string]struct{}, error) {
 	key := cacheKey{UserID: userID, TenantID: tenantID, Namespace: namespace, Scope: scopeName}
+	a.effectiveCacheLock.RLock()
+	if perms, found := a.effectivePermCache[key]; found {
+		a.effectiveCacheLock.RUnlock()
+		return perms, nil
+	}
+	a.effectiveCacheLock.RUnlock()
 	a.cacheLock.RLock()
 	if cached, found := a.permCache.Get(key); found {
 		a.cacheLock.RUnlock()
@@ -363,6 +612,12 @@ func (a *Authorizer) ResolvePrincipalPermissions(userID, tenantID, namespace, sc
 
 func (a *Authorizer) resolvePrincipalRoles(userID, tenantID, namespace string) (map[string]struct{}, error) {
 	key := cacheKey{UserID: userID, TenantID: tenantID, Namespace: namespace}
+	a.effectiveCacheLock.RLock()
+	if roles, found := a.effectiveRoleCache[key]; found {
+		a.effectiveCacheLock.RUnlock()
+		return roles, nil
+	}
+	a.effectiveCacheLock.RUnlock()
 	a.cacheLock.RLock()
 	if cached, found := a.roleCache.Get(key); found {
 		a.cacheLock.RUnlock()
@@ -531,12 +786,21 @@ func (a *Authorizer) Authorize(request Request) bool {
 		if request.Scope != "" && !a.isScopeValidForNamespace(ns, request.Scope) {
 			continue
 		}
-		permissions, err := a.ResolvePrincipalPermissions(request.Principal, tenant.ID, namespace, request.Scope)
-		if err != nil {
-			a.Log(slog.LevelWarn, request, "Failed to resolve permissions for authorization")
-			continue
+		key := cacheKey{UserID: request.Principal, TenantID: tenant.ID, Namespace: namespace, Scope: request.Scope}
+		a.effectiveCacheLock.RLock()
+		perms, found := a.effectivePermCache[key]
+		a.effectiveCacheLock.RUnlock()
+		if !found {
+
+			var err error
+			perms, err = a.ResolvePrincipalPermissions(request.Principal, tenant.ID, namespace, request.Scope)
+			if err != nil {
+				a.Log(slog.LevelWarn, request, "Failed to resolve permissions for authorization")
+				continue
+			}
 		}
-		for perm := range permissions {
+
+		for perm := range perms {
 			if strings.HasPrefix(perm, "DENY:") {
 				deniedPattern := strings.TrimPrefix(perm, "DENY:")
 				if utils.MatchResource(request.String(), deniedPattern) {
@@ -545,7 +809,8 @@ func (a *Authorizer) Authorize(request Request) bool {
 				}
 			}
 		}
-		for perm := range permissions {
+
+		for perm := range perms {
 			if strings.HasPrefix(perm, "DENY:") {
 				continue
 			}
@@ -575,11 +840,9 @@ func (a *Authorizer) findPrincipalTenants(userID string) []*Tenant {
 			}
 		}
 	}
-	tenantList := make([]*Tenant, len(tenantSet))
-	i := 0
+	tenantList := make([]*Tenant, 0, len(tenantSet))
 	for _, tenant := range tenantSet {
-		tenantList[i] = tenant
-		i++
+		tenantList = append(tenantList, tenant)
 	}
 	return tenantList
 }
@@ -686,130 +949,6 @@ func (t *Tenant) AddChildTenant(tenants ...*Tenant) {
 	}
 }
 
-type RoleDAG struct {
-	mu            sync.RWMutex
-	roles         map[string]*Role
-	edges         map[string][]string
-	resolved      map[string]map[string]struct{}
-	resolvedRoles map[string]map[string]struct{}
-}
-
-func NewRoleDAG() *RoleDAG {
-	return &RoleDAG{
-		roles:         make(map[string]*Role),
-		edges:         make(map[string][]string),
-		resolved:      make(map[string]map[string]struct{}),
-		resolvedRoles: make(map[string]map[string]struct{}),
-	}
-}
-
-func (dag *RoleDAG) AddRole(roles ...*Role) {
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
-	for _, role := range roles {
-		dag.roles[role.Name] = role
-	}
-	dag.resolved = make(map[string]map[string]struct{})
-	dag.resolvedRoles = make(map[string]map[string]struct{})
-}
-
-func (dag *RoleDAG) AddChildRole(parent string, child ...string) error {
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
-	if err := dag.checkCircularDependency(parent, child...); err != nil {
-		return err
-	}
-	dag.edges[parent] = append(dag.edges[parent], child...)
-	dag.resolved = make(map[string]map[string]struct{})
-	dag.resolvedRoles = make(map[string]map[string]struct{})
-	return nil
-}
-
-func (dag *RoleDAG) checkCircularDependency(parent string, children ...string) error {
-	visited := map[string]bool{parent: true}
-	var dfs func(string) bool
-	dfs = func(role string) bool {
-		if visited[role] {
-			return true
-		}
-		visited[role] = true
-		for _, child := range dag.edges[role] {
-			if dfs(child) {
-				return true
-			}
-		}
-		return false
-	}
-	for _, child := range children {
-		if dfs(child) {
-			return fmt.Errorf("circular role dependency detected: %s -> %s", parent, child)
-		}
-	}
-	return nil
-}
-
-func (dag *RoleDAG) ResolvePermissions(roleName string) map[string]struct{} {
-	dag.mu.RLock()
-	if permissions, found := dag.resolved[roleName]; found {
-		dag.mu.RUnlock()
-		return permissions
-	}
-	dag.mu.RUnlock()
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
-	visited := make(map[string]bool)
-	queue := []string{roleName}
-	result := make(map[string]struct{})
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		if visited[current] {
-			continue
-		}
-		visited[current] = true
-		role, exists := dag.roles[current]
-		if !exists {
-			continue
-		}
-		for perm := range role.Permissions {
-			result[perm] = struct{}{}
-		}
-		queue = append(queue, dag.edges[current]...)
-	}
-	dag.resolved[roleName] = result
-	return result
-}
-
-func (dag *RoleDAG) ResolveChildRoles(roleName string) map[string]struct{} {
-	dag.mu.RLock()
-	if roles, found := dag.resolvedRoles[roleName]; found {
-		dag.mu.RUnlock()
-		return roles
-	}
-	dag.mu.RUnlock()
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
-	visited := make(map[string]bool)
-	queue := []string{roleName}
-	result := make(map[string]struct{})
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
-		if visited[current] {
-			continue
-		}
-		visited[current] = true
-		role, exists := dag.roles[current]
-		if !exists {
-			continue
-		}
-		result[role.Name] = struct{}{}
-		queue = append(queue, dag.edges[current]...)
-	}
-	dag.resolvedRoles[roleName] = result
-	return result
-}
-
 func (a *Authorizer) AddRolesBulk(roles []*Role) {
 	a.roleDAG.AddRole(roles...)
 }
@@ -821,11 +960,6 @@ func (a *Authorizer) AddPermissionsBulk(roleName string, permissions []*Permissi
 	}
 	role.AddPermission(permissions...)
 	return nil
-}
-
-type CacheEntry struct {
-	Value      map[string]struct{}
-	Expiration time.Time
 }
 
 func (a *Authorizer) invalidateCache() {
@@ -857,56 +991,6 @@ func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[str
 		}
 	}
 	return a.Authorize(request)
-}
-
-type LRUCache struct {
-	data      map[cacheKey]*CacheEntry
-	order     []cacheKey
-	capacity  int
-	ttl       time.Duration
-	cacheLock sync.Mutex
-}
-
-func NewLRUCache(capacity int, ttl time.Duration) *LRUCache {
-	return &LRUCache{
-		data:     make(map[cacheKey]*CacheEntry),
-		order:    make([]cacheKey, 0, capacity),
-		capacity: capacity,
-		ttl:      ttl,
-	}
-}
-
-func (c *LRUCache) Get(key cacheKey) (map[string]struct{}, bool) {
-	c.cacheLock.Lock()
-	defer c.cacheLock.Unlock()
-	entry, exists := c.data[key]
-	if !exists || time.Now().After(entry.Expiration) {
-		return nil, false
-	}
-	c.moveToEnd(key)
-	return entry.Value, true
-}
-
-func (c *LRUCache) Put(key cacheKey, value map[string]struct{}) {
-	c.cacheLock.Lock()
-	defer c.cacheLock.Unlock()
-	if len(c.data) >= c.capacity {
-		oldest := c.order[0]
-		c.order = c.order[1:]
-		delete(c.data, oldest)
-	}
-	c.data[key] = &CacheEntry{Value: value, Expiration: time.Now().Add(c.ttl)}
-	c.order = append(c.order, key)
-}
-
-func (c *LRUCache) moveToEnd(key cacheKey) {
-	for i, k := range c.order {
-		if k == key {
-			c.order = append(c.order[:i], c.order[i+1:]...)
-			c.order = append(c.order, key)
-			break
-		}
-	}
 }
 
 var (
