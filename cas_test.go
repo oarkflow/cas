@@ -19,6 +19,28 @@ func TestAuthorize_ValidDirectPermission(t *testing.T) {
 	}
 }
 
+func TestWildcardResourcePermission(t *testing.T) {
+	authorizer := setupAuthorizer()
+	role := NewRole("role2")
+	role.AddPermission(&Permission{Resource: "resource/*", Action: "GET", Category: "category1"})
+	authorizer.AddRole(role)
+	authorizer.AddPrincipalRole(&PrincipalRole{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Role:      "role2",
+	})
+	request := Request{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Resource:  "resource/subresource",
+		Action:    "GET",
+	}
+	authorized := authorizer.Authorize(request)
+	if !authorized {
+		t.Errorf("Expected authorization for wildcard resource, got false")
+	}
+}
+
 func TestAuthorize_ValidParentTenantPermission(t *testing.T) {
 	authorizer := setupAuthorizer()
 	request := Request{

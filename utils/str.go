@@ -30,60 +30,84 @@ func ToInt64(s string) uint64 {
 	return ft.Sum64()
 }
 
+// MatchResource checks if the given value ("METHOD URI" or just a resource/action string)
+// matches the provided pattern. Patterns may include:
+//   - Wildcard '*' which matches any sequence of characters (including none).
+//   - Parameter prefix ':' (e.g., ':id') matching any segment until '/'.
+//
+// If the value contains an HTTP method (space as separator), both method and URI are matched.
 func MatchResource(value, pattern string) bool {
+	// Split out HTTP method if present
+	valParts := strings.SplitN(value, " ", 2)
+	patParts := strings.SplitN(pattern, " ", 2)
+
+	// If pattern includes a method, require it
+	if len(patParts) == 2 {
+		if len(valParts) != 2 || valParts[0] != patParts[0] {
+			return false
+		}
+		// Match URI part
+		return matchPattern(valParts[1], patParts[1])
+	}
+	return matchPattern(value, pattern)
+}
+
+// matchPattern matches a plain value against a pattern containing
+// '*' wildcards and ':' parameters. Parameters match until the next '/'.
+func matchPattern(value, pattern string) bool {
 	vIndex, pIndex := 0, 0
 	vLen, pLen := len(value), len(pattern)
 
 	for pIndex < pLen {
-		if pattern[pIndex] == '*' {
-			// If '*' is the last character in the pattern, it matches everything
+		switch pattern[pIndex] {
+		case '*':
+			// '*' matches any sequence; if it's last, accept
 			if pIndex == pLen-1 {
 				return true
 			}
-
-			// Find the next character in pattern after '*'
+			// Look ahead to next pattern character
 			nextChar := pattern[pIndex+1]
-
-			// If the next character is '*', skip it
-			if nextChar == '*' {
+			// Skip consecutive '*'
+			for pIndex+1 < pLen && pattern[pIndex+1] == '*' {
 				pIndex++
+			}
+			// If next is parameter or '/', just advance one char in value
+			if nextChar == ':' || nextChar == '/' {
+				vIndex++
 				continue
 			}
-
-			// Find the next occurrence of the character after '*' in the value
-			nextIndex := strings.IndexByte(value[vIndex:], nextChar)
-
-			// If the character is not found, no match
-			if nextIndex == -1 {
+			// Find nextChar in value
+			nextIdx := strings.IndexByte(value[vIndex:], nextChar)
+			if nextIdx < 0 {
 				return false
 			}
-
-			// Move the value index to the next occurrence of the character
-			vIndex += nextIndex
-		} else if pIndex < pLen && vIndex < vLen && (pattern[pIndex] == value[vIndex] || pattern[pIndex] == ':') {
-			// If pattern part matches value part or is a parameter, move to the next parts
-			vIndex++
+			// Shift vIndex to that occurrence
+			vIndex += nextIdx
 			pIndex++
-			// If pattern part is a parameter, skip it in the value
-			if pattern[pIndex-1] == ':' {
-				// Find the end of the parameter segment
-				endIndex := pIndex
-				for endIndex < pLen && pattern[endIndex] != '/' {
-					endIndex++
-				}
-				// Skip the parameter segment in the value
-				for vIndex < vLen && value[vIndex] != '/' {
-					vIndex++
-				}
-				// Move pattern index to the end of the parameter segment
-				pIndex = endIndex
+
+		case ':':
+			// Skip pattern until end of param name
+			pIndex++
+			for pIndex < pLen && pattern[pIndex] != '/' {
+				pIndex++
 			}
-		} else {
-			return false
+			// Skip value until next '/'
+			for vIndex < vLen && value[vIndex] != '/' {
+				vIndex++
+			}
+
+		default:
+			// Match literal char
+			if vIndex < vLen && pattern[pIndex] == value[vIndex] {
+				vIndex++
+				pIndex++
+			} else {
+				return false
+			}
 		}
 	}
 
-	// If both value and pattern are exhausted, return true
+	// Both fully consumed?
 	return vIndex == vLen && pIndex == pLen
 }
 

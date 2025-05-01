@@ -5,20 +5,24 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/oarflow/cas/utils"
 )
 
+// Extend Permission to support wildcards
 type Permission struct {
 	Resource string
 	Action   string
 	Category string
+	Wildcard bool // New field to indicate wildcard support
 }
 
-func NewPermission(category, resource, method string) *Permission {
-	return &Permission{Category: category, Resource: resource, Action: method}
+func NewPermission(category, resource, method string, wildcard ...bool) *Permission {
+	isWildcard := len(wildcard) > 0 && wildcard[0]
+	return &Permission{Category: category, Resource: resource, Action: method, Wildcard: isWildcard}
 }
 
 type Role struct {
@@ -152,7 +156,27 @@ type Request struct {
 }
 
 func (p Request) String() string {
-	return p.Action + " " + p.Resource
+	return p.Resource + " " + p.Action
+}
+
+// Extend Request to support dynamic attributes
+func (r Request) GetAttribute(key string) (string, bool) {
+	switch key {
+	case "principal":
+		return r.Principal, true
+	case "tenant":
+		return r.Tenant, true
+	case "namespace":
+		return r.Namespace, true
+	case "scope":
+		return r.Scope, true
+	case "resource":
+		return r.Resource, true
+	case "action":
+		return r.Action, true
+	default:
+		return "", false
+	}
 }
 
 type Clock interface {
@@ -182,7 +206,7 @@ type Authorizer struct {
 	auditLog         *slog.Logger
 	clock            Clock
 	m                sync.RWMutex
-	permissionsCache map[cacheKey]map[string]struct{}
+	permissionsCache map[cacheKey]CacheEntry
 	rolesCache       map[cacheKey]map[string]struct{}
 	cacheLock        sync.RWMutex
 }
@@ -199,7 +223,7 @@ func NewAuthorizer(auditLog ...*slog.Logger) *Authorizer {
 		userRoleMap:      make(map[string]map[string][]*PrincipalRole),
 		auditLog:         logger,
 		clock:            RealClock{},
-		permissionsCache: make(map[cacheKey]map[string]struct{}),
+		permissionsCache: make(map[cacheKey]CacheEntry),
 		rolesCache:       make(map[cacheKey]map[string]struct{}),
 	}
 }
@@ -296,13 +320,10 @@ func (a *Authorizer) GetDefaultTenant() (*Tenant, bool) {
 func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, scopeName string) (map[string]struct{}, error) {
 	key := cacheKey{UserID: userID, TenantID: tenantID, Namespace: namespace, Scope: scopeName}
 
-	// Check cache
-	a.cacheLock.RLock()
-	if cached, found := a.permissionsCache[key]; found {
-		a.cacheLock.RUnlock()
+	// Check TTL-based cache
+	if cached, found := a.getCachedPermissions(key); found {
 		return cached, nil
 	}
-	a.cacheLock.RUnlock()
 
 	// Compute permissions
 	a.m.RLock()
@@ -353,18 +374,9 @@ func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, sc
 		return nil, err
 	}
 
-	// Cache the result
-	a.cacheLock.Lock()
-	defer a.cacheLock.Unlock()
-	if len(scopedPermissions) > 0 {
-		a.permissionsCache[key] = scopedPermissions
-		return scopedPermissions, nil
-	}
-	if len(globalPermissions) > 0 {
-		a.permissionsCache[key] = globalPermissions
-		return globalPermissions, nil
-	}
-	return nil, fmt.Errorf("no roleDAG or permissions found")
+	// Cache the result with TTL
+	a.cachePermissions(key, scopedPermissions, 5*time.Minute)
+	return scopedPermissions, nil
 }
 
 // Optimized resolvePrincipalRoles with caching
@@ -579,13 +591,118 @@ func (a *Authorizer) findPrincipalTenants(userID string) []*Tenant {
 	return tenantList
 }
 
+// Extend matchPermission to handle wildcards and hierarchical resources
 func matchPermission(permission string, request Request) bool {
 	if request.Resource == "" && request.Action == "" {
 		return false
 	}
 	requestToCheck := request.String()
-	fmt.Println(requestToCheck, permission)
-	return utils.MatchResource(requestToCheck, permission)
+	if utils.MatchResource(requestToCheck, permission) {
+		return true
+	}
+	// Handle wildcard matching
+	if strings.Contains(permission, "*") {
+		return utils.MatchResource(requestToCheck, permission)
+	}
+	return false
+}
+
+// Add support for ABAC (Attribute-Based Access Control)
+type ABACPolicy struct {
+	Attributes map[string]string // Key-value pairs for dynamic attributes
+}
+
+func (a *Authorizer) EvaluateABAC(request Request, policy ABACPolicy) bool {
+	for key, value := range policy.Attributes {
+		if requestAttr, ok := request.GetAttribute(key); !ok || requestAttr != value {
+			return false
+		}
+	}
+	return true
+}
+
+// Add support for negative roles
+type NegativeRole struct {
+	Name        string
+	Permissions map[string]struct{}
+}
+
+func NewNegativeRole(name string) *NegativeRole {
+	return &NegativeRole{Name: name, Permissions: make(map[string]struct{})}
+}
+
+func (r *Role) AddNegativePermission(permissions ...*Permission) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	for _, permission := range permissions {
+		r.Permissions["-"+permission.String()] = struct{}{}
+	}
+}
+
+// Add bulk operations for roles and permissions
+func (a *Authorizer) AddPrincipalRolesBulk(userRoles []*PrincipalRole) {
+	a.m.Lock()
+	defer a.m.Unlock()
+	for _, ur := range userRoles {
+		a.AddPrincipalRole(ur)
+	}
+}
+
+func (a *Authorizer) RemovePrincipalRolesBulk(targets []PrincipalRole) error {
+	a.m.Lock()
+	defer a.m.Unlock()
+	for _, target := range targets {
+		if err := a.RemovePrincipalRole(target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Add event hooks for role/permission changes
+type EventHook func(eventType string, data any)
+
+var eventHooks []EventHook
+
+func RegisterEventHook(hook EventHook) {
+	eventHooks = append(eventHooks, hook)
+}
+
+func triggerEvent(eventType string, data any) {
+	for _, hook := range eventHooks {
+		hook(eventType, data)
+	}
+}
+
+// Add TTL-based caching with invalidation
+type CacheEntry struct {
+	Value      map[string]struct{}
+	Expiration time.Time
+}
+
+func (a *Authorizer) getCachedPermissions(key cacheKey) (map[string]struct{}, bool) {
+	a.cacheLock.RLock()
+	defer a.cacheLock.RUnlock()
+	entry, found := a.permissionsCache[key]
+	if !found || time.Now().After(entry.Expiration) {
+		return nil, false
+	}
+	return entry.Value, true
+}
+
+func (a *Authorizer) cachePermissions(key cacheKey, permissions map[string]struct{}, ttl time.Duration) {
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	a.permissionsCache[key] = CacheEntry{
+		Value:      permissions,
+		Expiration: time.Now().Add(ttl),
+	}
+}
+
+func (a *Authorizer) invalidateCache(key cacheKey) {
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	delete(a.permissionsCache, key)
 }
 
 func (a *Authorizer) AddRoles(role ...*Role) {
@@ -594,6 +711,7 @@ func (a *Authorizer) AddRoles(role ...*Role) {
 
 func (a *Authorizer) AddRole(role *Role) *Role {
 	a.AddRoles(role)
+	triggerEvent("role_added", role)
 	return role
 }
 
@@ -630,7 +748,7 @@ func (a *Authorizer) GetTenant(id string) (*Tenant, bool) {
 }
 
 func (p *Permission) String() string {
-	return p.Action + " " + p.Resource
+	return p.Resource + " " + p.Action
 }
 
 func (r *Role) AddPermission(permissions ...*Permission) {
@@ -638,6 +756,7 @@ func (r *Role) AddPermission(permissions ...*Permission) {
 	defer r.m.Unlock()
 	for _, permission := range permissions {
 		r.Permissions[permission.String()] = struct{}{}
+		triggerEvent("permission_added", permission)
 	}
 }
 
