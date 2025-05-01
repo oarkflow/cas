@@ -93,6 +93,10 @@ func matchPattern(value, pattern string) bool {
 	}
 
 	// Both fully consumed?
+	// Add support for hierarchical wildcards
+	if strings.HasSuffix(pattern, "/*") {
+		return strings.HasPrefix(value, strings.TrimSuffix(pattern, "/*"))
+	}
 	return vIndex == vLen && pIndex == pLen
 }
 

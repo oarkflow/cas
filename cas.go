@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -421,7 +422,6 @@ func (a *Authorizer) resolvePrincipalRoles(userID, tenantID, namespace string) (
 	return scopedRoles, nil
 }
 
-// Optimized findTargetTenants to avoid unnecessary slice copy
 func (a *Authorizer) findTargetTenants(request Request) ([]*Tenant, bool) {
 	if request.Tenant == "" && a.defaultTenant != "" {
 		request.Tenant = a.defaultTenant
@@ -429,11 +429,19 @@ func (a *Authorizer) findTargetTenants(request Request) ([]*Tenant, bool) {
 	if request.Tenant == "" {
 		return a.findPrincipalTenants(request.Principal), true
 	}
-	tenant, exists := a.tenants[request.Tenant]
-	if !exists {
+	var out []*Tenant
+	if t, ok := a.tenants[request.Tenant]; ok {
+		out = append(out, t)
+	}
+	if parent, ok := a.parentCache[request.Tenant]; ok {
+		if child, exists := parent.ChildTenants[request.Tenant]; exists {
+			out = append(out, child, parent)
+		}
+	}
+	if len(out) == 0 {
 		return nil, false
 	}
-	return []*Tenant{tenant}, true
+	return out, true
 }
 
 func (a *Authorizer) Log(level slog.Level, request Request, msg string) {
@@ -536,8 +544,20 @@ func (a *Authorizer) Authorize(request Request) bool {
 			a.Log(slog.LevelWarn, request, "Failed to resolve permissions for authorization")
 			continue
 		}
-		for permission := range permissions {
-			if matchPermission(permission, request) {
+		for perm := range permissions {
+			if strings.HasPrefix(perm, "DENY:") {
+				deniedPattern := strings.TrimPrefix(perm, "DENY:")
+				if utils.MatchResource(request.String(), deniedPattern) {
+					a.Log(slog.LevelWarn, request, "Authorization denied by explicit DENY")
+					return false
+				}
+			}
+		}
+		for perm := range permissions {
+			if strings.HasPrefix(perm, "DENY:") {
+				continue
+			}
+			if utils.MatchResource(request.String(), perm) {
 				a.Log(slog.LevelWarn, request, "Authorization granted")
 				return true
 			}
@@ -872,4 +892,89 @@ func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[str
 		}
 	}
 	return a.Authorize(request)
+}
+
+// Add LRU cache for resolved permissions with TTL
+type LRUCache struct {
+	data      map[cacheKey]*CacheEntry
+	order     []cacheKey
+	capacity  int
+	ttl       time.Duration
+	cacheLock sync.Mutex
+}
+
+func NewLRUCache(capacity int, ttl time.Duration) *LRUCache {
+	return &LRUCache{
+		data:     make(map[cacheKey]*CacheEntry),
+		order:    make([]cacheKey, 0, capacity),
+		capacity: capacity,
+		ttl:      ttl,
+	}
+}
+
+func (c *LRUCache) Get(key cacheKey) (map[string]struct{}, bool) {
+	c.cacheLock.Lock()
+	defer c.cacheLock.Unlock()
+	entry, exists := c.data[key]
+	if !exists || time.Now().After(entry.Expiration) {
+		return nil, false
+	}
+	c.moveToEnd(key)
+	return entry.Value, true
+}
+
+func (c *LRUCache) Put(key cacheKey, value map[string]struct{}) {
+	c.cacheLock.Lock()
+	defer c.cacheLock.Unlock()
+	if len(c.data) >= c.capacity {
+		oldest := c.order[0]
+		c.order = c.order[1:]
+		delete(c.data, oldest)
+	}
+	c.data[key] = &CacheEntry{Value: value, Expiration: time.Now().Add(c.ttl)}
+	c.order = append(c.order, key)
+}
+
+func (c *LRUCache) moveToEnd(key cacheKey) {
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			c.order = append(c.order, key)
+			break
+		}
+	}
+}
+
+// Add observability metrics
+var (
+	metricResolutionCount = 0
+	metricCacheHits       = 0
+)
+
+func (a *Authorizer) LogMetrics() {
+	fmt.Printf("Resolution Count: %d, Cache Hits: %d\n", metricResolutionCount, metricCacheHits)
+}
+
+// Add hierarchical tenancy with inheritance rules
+func (t *Tenant) AddChildTenantWithInheritance(tenant *Tenant, inheritRoles bool) {
+	t.m.Lock()
+	defer t.m.Unlock()
+	t.ChildTenants[tenant.ID] = tenant
+	if inheritRoles {
+		// Inherit namespaces
+		for nsID, ns := range t.Namespaces {
+			if _, exists := tenant.Namespaces[nsID]; !exists {
+				tenant.Namespaces[nsID] = NewNamespace(nsID)
+			}
+			for scopeID, scope := range ns.Scopes {
+				tenant.Namespaces[nsID].Scopes[scopeID] = scope
+			}
+		}
+		// Inherit roles and permissions
+		for _, role := range t.ChildTenants {
+			for _, childRole := range role.ChildTenants {
+				tenant.ChildTenants[childRole.ID] = childRole
+			}
+		}
+	}
 }

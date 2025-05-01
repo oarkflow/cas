@@ -146,3 +146,9 @@ func LoadRoleAttributes(auth *cas.Authorizer, data []map[string]any) error {
 	}
 	return nil
 }
+
+func SimulateAuthorization(authorizer *cas.Authorizer, request cas.Request) {
+	fmt.Println("Simulating authorization...")
+	authorized := authorizer.Authorize(request)
+	fmt.Printf("Simulation result: %v\n", authorized)
+}

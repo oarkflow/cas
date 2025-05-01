@@ -185,6 +185,56 @@ func TestWildcardAndHierarchicalResourceMatching(t *testing.T) {
 	}
 }
 
+func TestDenyPermissions(t *testing.T) {
+	authorizer := setupAuthorizer()
+	role := NewRole("role1")
+	role.AddDenyPermission(&Permission{Resource: "resourceA", Action: "GET"})
+	authorizer.AddRole(role)
+	authorizer.AddPrincipalRole(&PrincipalRole{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Role:      "role1",
+	})
+	request := Request{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Resource:  "resourceA",
+		Action:    "GET",
+	}
+	authorized := authorizer.Authorize(request)
+	if authorized {
+		t.Errorf("Expected authorization denied due to deny permission, got true")
+	}
+}
+
+func TestHierarchicalTenancy(t *testing.T) {
+	authorizer := setupAuthorizer()
+	parentTenant := NewTenant("parentTenant")
+	childTenant := NewTenant("childTenant")
+	parentTenant.AddNamespace("namespace1", true)
+	parentTenant.AddScopeToNamespace("namespace1", NewScope("scope1"))
+	parentTenant.AddChildTenantWithInheritance(childTenant, true)
+	authorizer.AddTenant(parentTenant)
+	authorizer.AddPrincipalRole(&PrincipalRole{
+		Principal: "user1",
+		Tenant:    "parentTenant",
+		Role:      "role1",
+	})
+	role := NewRole("role1")
+	role.AddPermission(&Permission{Resource: "resourceA", Action: "GET"})
+	authorizer.AddRole(role)
+	request := Request{
+		Principal: "user1",
+		Tenant:    "childTenant",
+		Resource:  "resourceA",
+		Action:    "GET",
+	}
+	authorized := authorizer.Authorize(request)
+	if !authorized {
+		t.Errorf("Expected authorization for inherited role, got false")
+	}
+}
+
 func setupAuthorizer() *Authorizer {
 	authorizer := NewAuthorizer()
 	role := NewRole("role1")
