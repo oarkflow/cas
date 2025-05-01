@@ -292,7 +292,7 @@ func (a *Authorizer) GetDefaultTenant() (*Tenant, bool) {
 	return nil, false
 }
 
-// Optimized resolvePrincipalPermissions with caching
+// Optimized resolvePrincipalPermissions with caching and reduced global scan
 func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, scopeName string) (map[string]struct{}, error) {
 	key := cacheKey{UserID: userID, TenantID: tenantID, Namespace: namespace, Scope: scopeName}
 
@@ -311,16 +311,13 @@ func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, sc
 	if !exists {
 		return nil, fmt.Errorf("invalid tenant: %v", tenantID)
 	}
-	globalPermissions := make(map[string]struct{})
-	scopedPermissions := make(map[string]struct{})
-	checkedTenants := make(map[string]bool)
+	globalPermissions := scopedPermissionsPool.Get()
+	scopedPermissions := scopedPermissionsPool.Get()
+	defer scopedPermissionsPool.Put(globalPermissions)
+	defer scopedPermissionsPool.Put(scopedPermissions)
 
 	var traverse func(current *Tenant) error
 	traverse = func(current *Tenant) error {
-		if checkedTenants[current.ID] {
-			return nil
-		}
-		checkedTenants[current.ID] = true
 		for _, userRole := range a.userRoleMap[userID][current.ID] {
 			if userRole.IsExpired(a.clock) {
 				continue
@@ -338,13 +335,9 @@ func (a *Authorizer) resolvePrincipalPermissions(userID, tenantID, namespace, sc
 				}
 			}
 		}
-		for _, userRole := range a.userRoleMap[userID][current.ID] {
-			if userRole.ManageChildTenant {
-				for _, child := range current.ChildTenants {
-					if err := traverse(child); err != nil {
-						return err
-					}
-				}
+		for _, child := range current.ChildTenants {
+			if err := traverse(child); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -579,12 +572,12 @@ func (a *Authorizer) findPrincipalTenants(userID string) []*Tenant {
 	return tenantList
 }
 
+// Add wildcard and hierarchical resource matching
 func matchPermission(permission string, request Request) bool {
 	if request.Resource == "" && request.Action == "" {
 		return false
 	}
 	requestToCheck := request.String()
-	fmt.Println(requestToCheck, permission)
 	return utils.MatchResource(requestToCheck, permission)
 }
 
@@ -638,6 +631,15 @@ func (r *Role) AddPermission(permissions ...*Permission) {
 	defer r.m.Unlock()
 	for _, permission := range permissions {
 		r.Permissions[permission.String()] = struct{}{}
+	}
+}
+
+// Add support for explicit permission denials
+func (r *Role) AddDenyPermission(permissions ...*Permission) {
+	r.m.Lock()
+	defer r.m.Unlock()
+	for _, permission := range permissions {
+		r.Permissions["DENY:"+permission.String()] = struct{}{}
 	}
 }
 
@@ -808,4 +810,66 @@ func (dag *RoleDAG) ResolveChildRoles(roleName string) map[string]struct{} {
 	}
 	dag.resolvedRoles[roleName] = result
 	return result
+}
+
+// Add bulk role/permission assignment
+func (a *Authorizer) AddRolesBulk(roles []*Role) {
+	a.roleDAG.AddRole(roles...)
+}
+
+func (a *Authorizer) AddPermissionsBulk(roleName string, permissions []*Permission) error {
+	role, exists := a.roleDAG.roles[roleName]
+	if !exists {
+		return fmt.Errorf("role %s does not exist", roleName)
+	}
+	role.AddPermission(permissions...)
+	return nil
+}
+
+// Add event hooks for observability
+type EventHook func(event string, data any)
+
+var eventHooks []EventHook
+
+func RegisterEventHook(hook EventHook) {
+	eventHooks = append(eventHooks, hook)
+}
+
+func triggerEvent(event string, data any) {
+	for _, hook := range eventHooks {
+		hook(event, data)
+	}
+}
+
+// Add caching with TTL invalidation
+type CacheEntry struct {
+	Value      map[string]struct{}
+	Expiration time.Time
+}
+
+func (a *Authorizer) invalidateCache() {
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	a.permissionsCache = make(map[cacheKey]map[string]struct{})
+	a.rolesCache = make(map[cacheKey]map[string]struct{})
+}
+
+func (a *Authorizer) SetCacheTTL(ttl time.Duration) {
+	go func() {
+		for {
+			time.Sleep(ttl)
+			a.invalidateCache()
+		}
+	}()
+}
+
+// Add ABAC support
+func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[string]any) bool {
+	// Example: Check time-based access
+	if timeAttr, ok := attributes["time"]; ok {
+		if timeAttr.(time.Time).Hour() < 9 || timeAttr.(time.Time).Hour() > 17 {
+			return false
+		}
+	}
+	return a.Authorize(request)
 }

@@ -2,6 +2,7 @@ package cas
 
 import (
 	"testing"
+	"time"
 )
 
 func TestAuthorize_ValidDirectPermission(t *testing.T) {
@@ -142,6 +143,45 @@ func TestAuthorize_ResolutionFailure(t *testing.T) {
 	authorized := authorizer.Authorize(request)
 	if authorized {
 		t.Errorf("Expected false due to permission resolution failure, got true")
+	}
+}
+
+func TestAuthorizeWithAttributes_TimeBasedAccess(t *testing.T) {
+	authorizer := setupAuthorizer()
+	request := Request{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Resource:  "resourceA",
+		Action:    "GET",
+	}
+	attributes := map[string]any{
+		"time": time.Date(2023, 10, 10, 20, 0, 0, 0, time.UTC), // Outside allowed hours
+	}
+	authorized := authorizer.AuthorizeWithAttributes(request, attributes)
+	if authorized {
+		t.Errorf("Expected authorization denied due to time-based restriction, got true")
+	}
+}
+
+func TestWildcardAndHierarchicalResourceMatching(t *testing.T) {
+	authorizer := setupAuthorizer()
+	role := NewRole("role3")
+	role.AddPermission(&Permission{Resource: "resource/*", Action: "GET"})
+	authorizer.AddRole(role)
+	authorizer.AddPrincipalRole(&PrincipalRole{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Role:      "role3",
+	})
+	request := Request{
+		Principal: "user1",
+		Tenant:    "tenant1",
+		Resource:  "resource/subresource",
+		Action:    "GET",
+	}
+	authorized := authorizer.Authorize(request)
+	if !authorized {
+		t.Errorf("Expected authorization for wildcard resource, got false")
 	}
 }
 

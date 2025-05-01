@@ -54,6 +54,7 @@ func MatchResource(value, pattern string) bool {
 
 // matchPattern matches a plain value against a pattern containing
 // '*' wildcards and ':' parameters. Parameters match until the next '/'.
+// Enhanced to support hierarchical resources.
 func matchPattern(value, pattern string) bool {
 	vIndex, pIndex := 0, 0
 	vLen, pLen := len(value), len(pattern)
@@ -65,26 +66,11 @@ func matchPattern(value, pattern string) bool {
 			if pIndex == pLen-1 {
 				return true
 			}
-			// Look ahead to next pattern character
-			nextChar := pattern[pIndex+1]
-			// Skip consecutive '*'
-			for pIndex+1 < pLen && pattern[pIndex+1] == '*' {
-				pIndex++
-			}
-			// If next is parameter or '/', just advance one char in value
-			if nextChar == ':' || nextChar == '/' {
+			// Match until next '/' or end of value
+			for vIndex < vLen && value[vIndex] != '/' {
 				vIndex++
-				continue
 			}
-			// Find nextChar in value
-			nextIdx := strings.IndexByte(value[vIndex:], nextChar)
-			if nextIdx < 0 {
-				return false
-			}
-			// Shift vIndex to that occurrence
-			vIndex += nextIdx
 			pIndex++
-
 		case ':':
 			// Skip pattern until end of param name
 			pIndex++
@@ -95,7 +81,6 @@ func matchPattern(value, pattern string) bool {
 			for vIndex < vLen && value[vIndex] != '/' {
 				vIndex++
 			}
-
 		default:
 			// Match literal char
 			if vIndex < vLen && pattern[pIndex] == value[vIndex] {
