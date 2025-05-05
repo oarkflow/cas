@@ -382,6 +382,7 @@ type Authorizer struct {
 	defaultTenant      string
 	auditLog           *slog.Logger
 	clock              Clock
+	defaultDeny        bool // new flag: if true, non-existing resourceactions default to deny
 	m                  sync.RWMutex
 	cacheLock          sync.RWMutex
 	abacHooks          []ABACFunc
@@ -392,23 +393,36 @@ type Authorizer struct {
 	effectiveCacheLock sync.RWMutex
 }
 
-func NewAuthorizer(auditLog ...*slog.Logger) *Authorizer {
-	var logger *slog.Logger
-	if len(auditLog) > 0 {
-		logger = auditLog[0]
+type Options func(*Authorizer)
+
+func WithDefaultDeny(val bool) Options {
+	return func(a *Authorizer) {
+		a.defaultDeny = val
 	}
-	return &Authorizer{
+}
+
+func WithLogger(logger *slog.Logger) Options {
+	return func(a *Authorizer) {
+		a.auditLog = logger
+	}
+}
+
+func NewAuthorizer(opts ...Options) *Authorizer {
+	auth := &Authorizer{
 		roleDAG:            NewRoleDAG(),
 		tenants:            make(map[string]*Tenant),
 		parentCache:        make(map[string]*Tenant),
 		userRoleMap:        make(map[string]map[string][]*PrincipalRole),
-		auditLog:           logger,
 		clock:              RealClock{},
 		permCache:          NewLRUCache(1000, 5*time.Minute),
 		roleCache:          NewLRUCache(1000, 5*time.Minute),
 		effectiveRoleCache: make(map[cacheKey]map[string]struct{}),
 		effectivePermCache: make(map[cacheKey]map[string]struct{}),
 	}
+	for _, opt := range opts {
+		opt(auth)
+	}
+	return auth
 }
 
 func (a *Authorizer) RegisterABAC(hook ABACFunc) {
@@ -820,8 +834,12 @@ func (a *Authorizer) Authorize(request Request) bool {
 			}
 		}
 	}
-	a.Log(slog.LevelWarn, request, "Authorization failed")
-	return false
+	if a.defaultDeny {
+		a.Log(slog.LevelWarn, request, "Authorization failed")
+		return false
+	}
+	a.Log(slog.LevelWarn, request, "Authorization granted by default because ResourceAction doesn't exist")
+	return true
 }
 
 func (a *Authorizer) isScopeValidForNamespace(ns *Namespace, scopeName string) bool {

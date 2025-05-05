@@ -6,7 +6,7 @@ import (
 )
 
 func TestAuthorize_ValidDirectPermission(t *testing.T) {
-	authorizer := setupAuthorizer() // Setup roleDAG, tenants, and user roleDAG
+	authorizer := setupAuthorizer(true) // Setup roleDAG, tenants, and user roleDAG
 	request := Request{
 		Principal: "user1",
 		Tenant:    "tenant1",
@@ -21,7 +21,7 @@ func TestAuthorize_ValidDirectPermission(t *testing.T) {
 }
 
 func TestWildcardResourcePermission(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	role := NewRole("role2")
 	role.AddPermission(&Permission{Resource: "resource/*", Action: "GET", Category: "category1"})
 	authorizer.AddRole(role)
@@ -43,7 +43,7 @@ func TestWildcardResourcePermission(t *testing.T) {
 }
 
 func TestAuthorize_ValidParentTenantPermission(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	request := Request{
 		Principal: "user2",
 		Tenant:    "childTenant1",
@@ -58,7 +58,7 @@ func TestAuthorize_ValidParentTenantPermission(t *testing.T) {
 }
 
 func TestAuthorize_ValidGlobalScopePermission(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	request := Request{
 		Principal: "user3",
 		Tenant:    "tenant2",
@@ -72,7 +72,7 @@ func TestAuthorize_ValidGlobalScopePermission(t *testing.T) {
 }
 
 func TestAuthorize_NoMatchingPermission(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	request := Request{
 		Principal: "user1",
 		Tenant:    "tenant1",
@@ -87,7 +87,7 @@ func TestAuthorize_NoMatchingPermission(t *testing.T) {
 }
 
 func TestAuthorize_InvalidTenant(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	request := Request{
 		Principal: "user1",
 		Tenant:    "invalidTenant",
@@ -117,7 +117,7 @@ func TestAuthorize_CircularRolePermissions(t *testing.T) {
 }
 
 func TestAuthorize_InvalidScope(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	request := Request{
 		Principal: "user1",
 		Tenant:    "tenant1",
@@ -132,7 +132,7 @@ func TestAuthorize_InvalidScope(t *testing.T) {
 }
 
 func TestAuthorize_ResolutionFailure(t *testing.T) {
-	authorizer := setupAuthorizer() // With misconfigured roleDAG or missing permissions
+	authorizer := setupAuthorizer(true) // With misconfigured roleDAG or missing permissions
 	request := Request{
 		Principal: "user4",
 		Tenant:    "tenant3",
@@ -147,7 +147,7 @@ func TestAuthorize_ResolutionFailure(t *testing.T) {
 }
 
 func TestAuthorizeWithAttributes_TimeBasedAccess(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	request := Request{
 		Principal: "user1",
 		Tenant:    "tenant1",
@@ -164,7 +164,7 @@ func TestAuthorizeWithAttributes_TimeBasedAccess(t *testing.T) {
 }
 
 func TestWildcardAndHierarchicalResourceMatching(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	role := NewRole("role3")
 	role.AddPermission(&Permission{Resource: "resource/*", Action: "GET"})
 	authorizer.AddRole(role)
@@ -186,7 +186,7 @@ func TestWildcardAndHierarchicalResourceMatching(t *testing.T) {
 }
 
 func TestDenyPermissions(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	role := NewRole("role1")
 	role.AddDenyPermission(&Permission{Resource: "resourceA", Action: "GET"})
 	authorizer.AddRole(role)
@@ -208,7 +208,7 @@ func TestDenyPermissions(t *testing.T) {
 }
 
 func TestHierarchicalTenancy(t *testing.T) {
-	authorizer := setupAuthorizer()
+	authorizer := setupAuthorizer(true)
 	parentTenant := NewTenant("parentTenant")
 	childTenant := NewTenant("childTenant")
 	parentTenant.AddNamespace("namespace1", true)
@@ -235,8 +235,8 @@ func TestHierarchicalTenancy(t *testing.T) {
 	}
 }
 
-func setupAuthorizer() *Authorizer {
-	authorizer := NewAuthorizer()
+func setupAuthorizer(defaultDeny bool) *Authorizer {
+	authorizer := NewAuthorizer(WithDefaultDeny(defaultDeny))
 	role := NewRole("role1")
 	role.AddPermission(&Permission{Resource: "resourceA", Action: "GET", Category: "category1"})
 	authorizer.AddRole(role)
