@@ -371,7 +371,15 @@ func (dag *RoleDAG) ResolveChildRoles(roleName string) map[string]struct{} {
 	return result
 }
 
-type ABACFunc func(request Request, attributes map[string]any) (allow bool, err error)
+// ABACFunc defines the signature for ABAC hooks.
+// It returns (allow, error). If allow is false or error is non-nil, access is denied.
+type ABACFunc func(request Request, attributes map[string]any) (bool, error)
+
+// RegisterABAC registers an ABAC (attribute-based access control) hook.
+// The hook is called before RBAC checks. If any hook returns false or error, access is denied.
+func (a *Authorizer) RegisterABAC(hook ABACFunc) {
+	a.abacHooks = append(a.abacHooks, hook)
+}
 
 type Authorizer struct {
 	roleDAG            *RoleDAG
@@ -383,7 +391,8 @@ type Authorizer struct {
 	auditLog           *slog.Logger
 	clock              Clock
 	defaultDeny        bool // new flag: if true, non-existing resourceactions default to deny
-	m                  sync.RWMutex
+	tenantsMU          sync.RWMutex
+	userRolesMU        sync.RWMutex
 	cacheLock          sync.RWMutex
 	abacHooks          []ABACFunc
 	permCache          *LRUCache
@@ -425,22 +434,12 @@ func NewAuthorizer(opts ...Options) *Authorizer {
 	return auth
 }
 
-func (a *Authorizer) RegisterABAC(hook ABACFunc) {
-	a.abacHooks = append(a.abacHooks, hook)
-}
-
-func (a *Authorizer) SetDefaultTenant(tenant string) {
-	a.defaultTenant = tenant
-}
-
 func (a *Authorizer) updateEffectiveCachesForRole(pr *PrincipalRole) {
 	effectiveTenantIDs := []string{pr.Tenant}
 	if pr.ManageChildTenant {
-		a.m.RLock()
-		if tenant, ok := a.tenants[pr.Tenant]; ok {
+		if tenant, ok := a.GetTenant(pr.Tenant); ok {
 			effectiveTenantIDs = append(effectiveTenantIDs, tenant.getDescendantIDs()...)
 		}
-		a.m.RUnlock()
 	}
 	for _, tid := range effectiveTenantIDs {
 		key := cacheKey{
@@ -466,8 +465,8 @@ func (a *Authorizer) updateEffectiveCachesForRole(pr *PrincipalRole) {
 }
 
 func (a *Authorizer) AddPrincipalRole(userRole ...*PrincipalRole) {
-	a.m.Lock()
-	defer a.m.Unlock()
+	a.userRolesMU.Lock()
+	defer a.userRolesMU.Unlock()
 	for _, ur := range userRole {
 		a.userRoles = append(a.userRoles, ur)
 		if a.userRoleMap[ur.Principal] == nil {
@@ -476,6 +475,7 @@ func (a *Authorizer) AddPrincipalRole(userRole ...*PrincipalRole) {
 		a.userRoleMap[ur.Principal][ur.Tenant] = append(a.userRoleMap[ur.Principal][ur.Tenant], ur)
 		a.updateEffectiveCachesForRole(ur)
 	}
+	a.invalidateCache()
 }
 
 func (a *Authorizer) rebuildEffectiveCaches() {
@@ -489,8 +489,8 @@ func (a *Authorizer) rebuildEffectiveCaches() {
 }
 
 func (a *Authorizer) RemovePrincipalRole(target PrincipalRole) error {
-	a.m.Lock()
-	defer a.m.Unlock()
+	a.userRolesMU.Lock()
+	defer a.userRolesMU.Unlock()
 	rolesRemoved := false
 	for i := 0; i < len(a.userRoles); {
 		if matches(&target, a.userRoles[i]) {
@@ -523,6 +523,7 @@ func (a *Authorizer) RemovePrincipalRole(target PrincipalRole) error {
 		}
 	}
 	a.rebuildEffectiveCaches()
+	a.invalidateCache()
 	return nil
 }
 
@@ -572,9 +573,7 @@ func (a *Authorizer) ResolvePrincipalPermissions(userID, tenantID, namespace, sc
 		return cached, nil
 	}
 	a.cacheLock.RUnlock()
-	a.m.RLock()
-	defer a.m.RUnlock()
-	tenant, exists := a.tenants[tenantID]
+	tenant, exists := a.GetTenant(tenantID)
 	if !exists {
 		return nil, fmt.Errorf("invalid tenant: %v", tenantID)
 	}
@@ -638,9 +637,7 @@ func (a *Authorizer) resolvePrincipalRoles(userID, tenantID, namespace string) (
 		return cached, nil
 	}
 	a.cacheLock.RUnlock()
-	a.m.RLock()
-	defer a.m.RUnlock()
-	tenant, exists := a.tenants[tenantID]
+	tenant, exists := a.GetTenant(tenantID)
 	if !exists {
 		return nil, fmt.Errorf("invalid tenant: %v", tenantID)
 	}
@@ -773,7 +770,24 @@ func (a *Authorizer) Can(request Request, roles ...string) bool {
 	return false
 }
 
-func (a *Authorizer) Authorize(request Request) bool {
+func (a *Authorizer) Authorize(request Request, attrs ...map[string]any) bool {
+	if len(attrs) > 0 && attrs[0] != nil {
+		for _, hook := range a.abacHooks {
+			allow, err := hook(request, attrs[0])
+			if err != nil || !allow {
+				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
+				return false
+			}
+		}
+	}
+	// ABAC hooks: called with nil attributes for backward compatibility
+	for _, hook := range a.abacHooks {
+		allow, err := hook(request, nil)
+		if err != nil || !allow {
+			a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
+			return false
+		}
+	}
 	targetTenants, isValidTenant := a.FindTargetTenants(request)
 	if !isValidTenant {
 		a.Log(slog.LevelWarn, request, "Failed authorization due to invalid tenant")
@@ -805,7 +819,6 @@ func (a *Authorizer) Authorize(request Request) bool {
 		perms, found := a.effectivePermCache[key]
 		a.effectiveCacheLock.RUnlock()
 		if !found {
-
 			var err error
 			perms, err = a.ResolvePrincipalPermissions(request.Principal, tenant.ID, namespace, request.Scope)
 			if err != nil {
@@ -813,7 +826,6 @@ func (a *Authorizer) Authorize(request Request) bool {
 				continue
 			}
 		}
-
 		for perm := range perms {
 			if strings.HasPrefix(perm, "DENY:") {
 				deniedPattern := strings.TrimPrefix(perm, "DENY:")
@@ -823,7 +835,6 @@ func (a *Authorizer) Authorize(request Request) bool {
 				}
 			}
 		}
-
 		for perm := range perms {
 			if strings.HasPrefix(perm, "DENY:") {
 				continue
@@ -842,6 +853,32 @@ func (a *Authorizer) Authorize(request Request) bool {
 	return true
 }
 
+// --- ABAC Example ---
+//
+// Example: Register an ABAC hook to allow access only during business hours
+//
+//	authorizer := cas.NewAuthorizer()
+//	authorizer.RegisterABAC(func(req cas.Request, attrs map[string]any) (bool, error) {
+//	    now := time.Now()
+//	    if now.Hour() < 9 || now.Hour() > 17 {
+//	        return false, nil // deny outside 9am-5pm
+//	    }
+//	    return true, nil
+//	})
+//
+//	// With attributes (e.g., resource owner check)
+//	authorizer.RegisterABAC(func(req cas.Request, attrs map[string]any) (bool, error) {
+//	    if owner, ok := attrs["owner_id"]; ok && owner == req.Principal {
+//	        return true, nil // allow if principal is owner
+//	    }
+//	    return false, nil
+//	})
+//
+//	// Usage:
+//	allowed := authorizer.AuthorizeWithAttributes(
+//	    cas.Request{Principal: "alice", Resource: "/doc/123", Action: "read"},
+//	    map[string]any{"owner_id": "alice"},
+//	)
 func (a *Authorizer) isScopeValidForNamespace(ns *Namespace, scopeName string) bool {
 	_, exists := ns.Scopes[scopeName]
 	return exists
@@ -890,9 +927,11 @@ func (a *Authorizer) AddTenants(tenants ...*Tenant) {
 }
 
 func (a *Authorizer) AddTenant(tenant *Tenant) *Tenant {
-	a.m.Lock()
-	defer a.m.Unlock()
+	a.tenantsMU.Lock()
+	defer a.tenantsMU.Unlock()
 	a.tenants[tenant.ID] = tenant
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
 	for _, child := range tenant.ChildTenants {
 		a.parentCache[child.ID] = tenant
 	}
@@ -900,8 +939,8 @@ func (a *Authorizer) AddTenant(tenant *Tenant) *Tenant {
 }
 
 func (a *Authorizer) GetTenant(id string) (*Tenant, bool) {
-	a.m.RLock()
-	defer a.m.RUnlock()
+	a.tenantsMU.RLock()
+	defer a.tenantsMU.RUnlock()
 	tenant, ok := a.tenants[id]
 	return tenant, ok
 }
@@ -980,35 +1019,134 @@ func (a *Authorizer) AddPermissionsBulk(roleName string, permissions []*Permissi
 	return nil
 }
 
-func (a *Authorizer) invalidateCache() {
-	a.cacheLock.Lock()
-	defer a.cacheLock.Unlock()
-	a.permCache = NewLRUCache(1000, 5*time.Minute)
-	a.roleCache = NewLRUCache(1000, 5*time.Minute)
+func (a *Authorizer) RemoveRole(roleName string) error {
+	a.roleDAG.mu.Lock()
+	defer a.roleDAG.mu.Unlock()
+	if _, exists := a.roleDAG.roles[roleName]; !exists {
+		return fmt.Errorf("role %s does not exist", roleName)
+	}
+	delete(a.roleDAG.roles, roleName)
+	delete(a.roleDAG.edges, roleName)
+	delete(a.roleDAG.resolved, roleName)
+	delete(a.roleDAG.resolvedRoles, roleName)
+	a.invalidateCache()
+	a.rebuildEffectiveCaches()
+	return nil
 }
 
-func (a *Authorizer) SetCacheTTL(ttl time.Duration) {
-	go func() {
-		for {
-			time.Sleep(ttl)
-			a.invalidateCache()
-		}
-	}()
+func (a *Authorizer) RemovePermissionFromRole(roleName string, permissions ...*Permission) error {
+	a.roleDAG.mu.Lock()
+	defer a.roleDAG.mu.Unlock()
+	role, exists := a.roleDAG.roles[roleName]
+	if !exists {
+		return fmt.Errorf("role %s does not exist", roleName)
+	}
+	role.RemovePermission(permissions...)
+	a.invalidateCache()
+	a.rebuildEffectiveCaches()
+	return nil
 }
 
-func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[string]any) bool {
-	for _, hook := range a.abacHooks {
-		allow, err := hook(request, attributes)
-		if err != nil || !allow {
-			return false
+func (a *Authorizer) ListPermissions(roleName string) ([]string, error) {
+	a.roleDAG.mu.RLock()
+	defer a.roleDAG.mu.RUnlock()
+	role, exists := a.roleDAG.roles[roleName]
+	if !exists {
+		return nil, fmt.Errorf("role %s does not exist", roleName)
+	}
+	role.m.RLock()
+	defer role.m.RUnlock()
+	perms := make([]string, 0, len(role.Permissions))
+	for p := range role.Permissions {
+		perms = append(perms, p)
+	}
+	return perms, nil
+}
+
+func (a *Authorizer) ListNamespaces(tenantID string) ([]string, error) {
+	tenant, ok := a.GetTenant(tenantID)
+	if !ok {
+		return nil, fmt.Errorf("tenant %s does not exist", tenantID)
+	}
+	tenant.m.RLock()
+	defer tenant.m.RUnlock()
+	namespaces := make([]string, 0, len(tenant.Namespaces))
+	for ns := range tenant.Namespaces {
+		namespaces = append(namespaces, ns)
+	}
+	return namespaces, nil
+}
+
+func (a *Authorizer) ListScopes(tenantID, namespace string) ([]string, error) {
+	tenant, ok := a.GetTenant(tenantID)
+	if !ok {
+		return nil, fmt.Errorf("tenant %s does not exist", tenantID)
+	}
+	tenant.m.RLock()
+	defer tenant.m.RUnlock()
+	ns, exists := tenant.Namespaces[namespace]
+	if !exists {
+		return nil, fmt.Errorf("namespace %s does not exist in tenant %s", namespace, tenantID)
+	}
+	scopes := make([]string, 0, len(ns.Scopes))
+	for s := range ns.Scopes {
+		scopes = append(scopes, s)
+	}
+	return scopes, nil
+}
+
+func (a *Authorizer) RoleExists(roleName string) bool {
+	a.roleDAG.mu.RLock()
+	defer a.roleDAG.mu.RUnlock()
+	_, exists := a.roleDAG.roles[roleName]
+	return exists
+}
+
+func (a *Authorizer) PermissionExists(roleName, perm string) bool {
+	a.roleDAG.mu.RLock()
+	defer a.roleDAG.mu.RUnlock()
+	role, exists := a.roleDAG.roles[roleName]
+	if !exists {
+		return false
+	}
+	role.m.RLock()
+	defer role.m.RUnlock()
+	_, ok := role.Permissions[perm]
+	return ok
+}
+
+func (a *Authorizer) CleanExpiredPrincipalRoles() {
+	a.userRolesMU.Lock()
+	defer a.userRolesMU.Unlock()
+	now := a.clock.Now()
+	filtered := a.userRoles[:0]
+	for _, pr := range a.userRoles {
+		if pr.Expiry == nil || now.Before(*pr.Expiry) {
+			filtered = append(filtered, pr)
 		}
 	}
-	if timeAttr, ok := attributes["time"]; ok {
-		if timeAttr.(time.Time).Hour() < 9 || timeAttr.(time.Time).Hour() > 17 {
-			return false
+	a.userRoles = filtered
+	// Clean userRoleMap
+	for principal, tenants := range a.userRoleMap {
+		for tenantID, roles := range tenants {
+			filteredRoles := roles[:0]
+			for _, pr := range roles {
+				if pr.Expiry == nil || now.Before(*pr.Expiry) {
+					filteredRoles = append(filteredRoles, pr)
+				}
+			}
+			if len(filteredRoles) == 0 {
+				delete(tenants, tenantID)
+			} else {
+				a.userRoleMap[principal][tenantID] = filteredRoles
+			}
+		}
+		if len(tenants) == 0 {
+			delete(a.userRoleMap, principal)
 		}
 	}
-	return a.Authorize(request)
+	a.rebuildEffectiveCaches()
+	a.invalidateCache()
 }
 
 var (
@@ -1042,8 +1180,8 @@ func (t *Tenant) AddChildTenantWithInheritance(tenant *Tenant, inheritRoles bool
 }
 
 func (a *Authorizer) ListTenants() []*Tenant {
-	a.m.RLock()
-	defer a.m.RUnlock()
+	a.tenantsMU.RLock()
+	defer a.tenantsMU.RUnlock()
 	tenants := make([]*Tenant, 0, len(a.tenants))
 	for _, t := range a.tenants {
 		tenants = append(tenants, t)
@@ -1062,8 +1200,8 @@ func (a *Authorizer) ListRoles() []*Role {
 }
 
 func (a *Authorizer) ListAssignments() []*PrincipalRole {
-	a.m.RLock()
-	defer a.m.RUnlock()
+	a.userRolesMU.RLock()
+	defer a.userRolesMU.RUnlock()
 	out := make([]*PrincipalRole, len(a.userRoles))
 	copy(out, a.userRoles)
 	return out
@@ -1071,4 +1209,11 @@ func (a *Authorizer) ListAssignments() []*PrincipalRole {
 
 func (a *Authorizer) Clock() Clock {
 	return a.clock
+}
+
+func (a *Authorizer) invalidateCache() {
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	a.permCache = NewLRUCache(1000, 5*time.Minute)
+	a.roleCache = NewLRUCache(1000, 5*time.Minute)
 }
