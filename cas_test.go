@@ -148,6 +148,25 @@ func TestAuthorize_ResolutionFailure(t *testing.T) {
 
 func TestAuthorizeWithAttributes_TimeBasedAccess(t *testing.T) {
 	authorizer := setupAuthorizer(true)
+	// Register ABAC hook for business hours using 'time' attribute if present
+	authorizer.RegisterABAC("timeBased", func(req Request, attrs map[string]any) (bool, error) {
+		if len(attrs) == 0 {
+			return true, nil
+		}
+		var now time.Time
+		if attrs != nil {
+			if t, ok := attrs["time"].(time.Time); ok {
+				now = t
+			}
+		}
+		if now.IsZero() {
+			now = time.Now()
+		}
+		if now.Hour() < 9 || now.Hour() > 17 {
+			return false, nil // deny outside 9am-5pm
+		}
+		return true, nil
+	})
 	request := Request{
 		Principal: "user1",
 		Tenant:    "tenant1",

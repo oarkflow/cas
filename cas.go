@@ -3,6 +3,7 @@ package cas
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"slices"
 	"strings"
@@ -377,8 +378,16 @@ type ABACFunc func(request Request, attributes map[string]any) (bool, error)
 
 // RegisterABAC registers an ABAC (attribute-based access control) hook.
 // The hook is called before RBAC checks. If any hook returns false or error, access is denied.
-func (a *Authorizer) RegisterABAC(hook ABACFunc) {
-	a.abacHooks = append(a.abacHooks, hook)
+func (a *Authorizer) RegisterABAC(name string, hook ABACFunc) {
+	if a.abacHooks == nil {
+		a.abacHooks = make(map[string]ABACFunc)
+	}
+	if _, exists := a.abacHooks[name]; exists {
+		log.Printf("ABAC hook with name %s already exists, overwriting", name)
+	}
+	if hook != nil {
+		a.abacHooks[name] = hook
+	}
 }
 
 type Authorizer struct {
@@ -394,7 +403,7 @@ type Authorizer struct {
 	tenantsMU          sync.RWMutex
 	userRolesMU        sync.RWMutex
 	cacheLock          sync.RWMutex
-	abacHooks          []ABACFunc
+	abacHooks          map[string]ABACFunc
 	permCache          *LRUCache
 	roleCache          *LRUCache
 	effectiveRoleCache map[cacheKey]map[string]struct{}
@@ -589,11 +598,12 @@ func (a *Authorizer) ResolvePrincipalPermissions(userID, tenantID, namespace, sc
 			}
 			if userRole.Namespace == "" || userRole.Namespace == namespace {
 				permissions := a.roleDAG.ResolvePermissions(userRole.Role)
-				if userRole.Scope == scopeName {
+				switch userRole.Scope {
+				case scopeName:
 					for perm := range permissions {
 						scopedPermissions[perm] = struct{}{}
 					}
-				} else if userRole.Scope == "" {
+				case "":
 					for perm := range permissions {
 						globalPermissions[perm] = struct{}{}
 					}
@@ -859,7 +869,15 @@ func (a *Authorizer) Authorize(request Request, attrs ...map[string]any) bool {
 //
 //	authorizer := cas.NewAuthorizer()
 //	authorizer.RegisterABAC(func(req cas.Request, attrs map[string]any) (bool, error) {
-//	    now := time.Now()
+//	    var now time.Time
+//	    if attrs != nil {
+//	        if t, ok := attrs["time"].(time.Time); ok {
+//	            now = t
+//	        }
+//	    }
+//	    if now.IsZero() {
+//	        now = time.Now()
+//	    }
 //	    if now.Hour() < 9 || now.Hour() > 17 {
 //	        return false, nil // deny outside 9am-5pm
 //	    }
