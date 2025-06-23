@@ -70,21 +70,23 @@ func main() {
 
 	fmt.Println("\n== ABAC with Attributes ==")
 	attrReq := cas.Request{
-		Principal: "21890",
-		Tenant:    "1",
-		Resource:  "/resource/123",
-		Action:    "read",
+		Principal:  "21890",
+		Tenant:     "1",
+		Resource:   "/resource/123",
+		Action:     "read",
+		Attributes: map[string]any{"owner_id": "21890"},
 	}
-	authorizedWithAttrs := authorizer.Authorize(attrReq, map[string]any{"owner_id": "21890"})
+	authorizedWithAttrs := authorizer.Authorize(attrReq)
 	fmt.Println("AuthorizeWithAttributes (owner match, should be true):", authorizedWithAttrs)
 
 	attrReqNotOwner := cas.Request{
-		Principal: "21890",
-		Tenant:    "1",
-		Resource:  "/resource/123",
-		Action:    "read",
+		Principal:  "21890",
+		Tenant:     "1",
+		Resource:   "/resource/123",
+		Action:     "read",
+		Attributes: map[string]any{"owner_id": "99999"},
 	}
-	authorizedWithAttrsFail := authorizer.Authorize(attrReqNotOwner, map[string]any{"owner_id": "99999"})
+	authorizedWithAttrsFail := authorizer.Authorize(attrReqNotOwner)
 	fmt.Println("AuthorizeWithAttributes (owner mismatch, should be false):", authorizedWithAttrsFail)
 
 	// --- ABAC with attributes: No attributes provided ---
@@ -93,18 +95,14 @@ func main() {
 
 	// --- ABAC with attributes: Attributes provided but principal is empty ---
 	attrReqNoPrincipal := cas.Request{
-		Principal: "",
-		Tenant:    "1",
-		Resource:  "/resource/123",
-		Action:    "read",
+		Principal:  "",
+		Tenant:     "1",
+		Resource:   "/resource/123",
+		Action:     "read",
+		Attributes: map[string]any{"owner_id": "21890"},
 	}
-	authorizedWithAttrsNoPrincipal := authorizer.Authorize(attrReqNoPrincipal, map[string]any{"owner_id": "21890"})
+	authorizedWithAttrsNoPrincipal := authorizer.Authorize(attrReqNoPrincipal)
 	fmt.Println("AuthorizeWithAttributes (no principal, should be false):", authorizedWithAttrsNoPrincipal)
-
-	err = LoadPermissions(authorizer)
-	if err != nil {
-		panic(err)
-	}
 }
 
 func LoadPermissions(auth *cas.Authorizer) error {

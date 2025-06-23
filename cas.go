@@ -3,6 +3,7 @@ package cas
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"slices"
 	"strings"
@@ -163,12 +164,13 @@ func (pr *PrincipalRole) ClearExpiry() {
 }
 
 type Request struct {
-	Principal string
-	Tenant    string
-	Namespace string
-	Scope     string
-	Resource  string
-	Action    string
+	Principal  string
+	Tenant     string
+	Namespace  string
+	Scope      string
+	Resource   string
+	Action     string
+	Attributes map[string]any
 }
 
 func (p Request) String() string {
@@ -377,89 +379,27 @@ type ABACFunc func(request Request, attributes map[string]any) (bool, error)
 
 // RegisterABAC registers an ABAC (attribute-based access control) hook.
 // The hook is called before RBAC checks. If any hook returns false or error, access is denied.
-func (a *Authorizer) RegisterABAC(hook ABACFunc) {
-	a.abacHooks = append(a.abacHooks, hook)
-}
-
-func (a *Authorizer) ClearABACHooks() {
-	a.abacHooks = nil
-}
-
-func (a *Authorizer) ListABACHooks() []ABACFunc {
-	return a.abacHooks
-}
-
-// to list all ABAC hooks with their indices.
-func (a *Authorizer) ListABACHooksWithIndices() []struct {
-	Index int
-	Hook  ABACFunc
-} {
-	hooks := make([]struct {
-		Index int
-		Hook  ABACFunc
-	}, len(a.abacHooks))
-	for i, hook := range a.abacHooks {
-		hooks[i] = struct {
-			Index int
-			Hook  ABACFunc
-		}{Index: i, Hook: hook}
+func (a *Authorizer) RegisterABAC(name string, hook ABACFunc) {
+	if a.abacHooks == nil {
+		a.abacHooks = make(map[string]ABACFunc)
 	}
-	return hooks
-}
-
-func (a *Authorizer) ClearExpiredCacheEntries() {
-	a.cacheLock.Lock()
-	defer a.cacheLock.Unlock()
-	now := time.Now()
-	for key, entry := range a.permCache.data {
-		if now.After(entry.Expiration) {
-			delete(a.permCache.data, key)
-		}
+	if _, exists := a.abacHooks[name]; exists {
+		log.Printf("ABAC hook with name %s already exists, overwriting", name)
 	}
-	for key, entry := range a.roleCache.data {
-		if now.After(entry.Expiration) {
-			delete(a.roleCache.data, key)
-		}
+	if hook != nil {
+		a.abacHooks[name] = hook
 	}
 }
 
-// to validate the structure of the Role DAG for consistency.
-func (dag *RoleDAG) ValidateStructure() error {
-	dag.mu.RLock()
-	defer dag.mu.RUnlock()
-	for role, children := range dag.edges {
-		if _, exists := dag.roles[role]; !exists {
-			return fmt.Errorf("role %s does not exist in DAG", role)
-		}
-		for _, child := range children {
-			if _, exists := dag.roles[child]; !exists {
-				return fmt.Errorf("child role %s does not exist in DAG", child)
-			}
-		}
+func (a *Authorizer) RemoveABAC(name string) {
+	if a.abacHooks == nil {
+		return
 	}
-	return nil
-}
-
-// to retrieve all permissions for a given principal across all tenants.
-func (a *Authorizer) GetAllPermissionsForPrincipal(userID string) (map[string]struct{}, error) {
-	permissions := make(map[string]struct{})
-	a.tenantsMU.RLock()
-	defer a.tenantsMU.RUnlock()
-	for _, tenant := range a.tenants {
-		for _, userRole := range a.userRoleMap[userID][tenant.ID] {
-			if userRole.IsExpired(a.clock) {
-				continue
-			}
-			perms := a.roleDAG.ResolvePermissions(userRole.Role)
-			for perm := range perms {
-				permissions[perm] = struct{}{}
-			}
-		}
+	if _, exists := a.abacHooks[name]; exists {
+		delete(a.abacHooks, name)
+	} else {
+		log.Printf("ABAC hook with name %s does not exist", name)
 	}
-	if len(permissions) == 0 {
-		return nil, fmt.Errorf("no permissions found for principal %s", userID)
-	}
-	return permissions, nil
 }
 
 type Authorizer struct {
@@ -475,7 +415,7 @@ type Authorizer struct {
 	tenantsMU          sync.RWMutex
 	userRolesMU        sync.RWMutex
 	cacheLock          sync.RWMutex
-	abacHooks          []ABACFunc
+	abacHooks          map[string]ABACFunc
 	permCache          *LRUCache
 	roleCache          *LRUCache
 	effectiveRoleCache map[cacheKey]map[string]struct{}
@@ -852,10 +792,10 @@ func (a *Authorizer) Can(request Request, roles ...string) bool {
 	return false
 }
 
-func (a *Authorizer) Authorize(request Request, attrs ...map[string]any) bool {
-	if len(attrs) > 0 && attrs[0] != nil {
+func (a *Authorizer) Authorize(request Request) bool {
+	if len(request.Attributes) > 0 {
 		for _, hook := range a.abacHooks {
-			allow, err := hook(request, attrs[0])
+			allow, err := hook(request, request.Attributes)
 			if err != nil || !allow {
 				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
 				return false
@@ -941,7 +881,15 @@ func (a *Authorizer) Authorize(request Request, attrs ...map[string]any) bool {
 //
 //	authorizer := cas.NewAuthorizer()
 //	authorizer.RegisterABAC(func(req cas.Request, attrs map[string]any) (bool, error) {
-//	    now := time.Now()
+//	    var now time.Time
+//	    if attrs != nil {
+//	        if t, ok := attrs["time"].(time.Time); ok {
+//	            now = t
+//	        }
+//	    }
+//	    if now.IsZero() {
+//	        now = time.Now()
+//	    }
 //	    if now.Hour() < 9 || now.Hour() > 17 {
 //	        return false, nil // deny outside 9am-5pm
 //	    }
@@ -1342,14 +1290,6 @@ func (a *Authorizer) ScopeExists(tenantID, namespace, scopeName string) bool {
 	}
 	_, exists = ns.Scopes[scopeName]
 	return exists
-}
-
-func (a *Authorizer) RemoveABACHook(index int) error {
-	if index < 0 || index >= len(a.abacHooks) {
-		return fmt.Errorf("invalid index")
-	}
-	a.abacHooks = append(a.abacHooks[:index], a.abacHooks[index+1:]...)
-	return nil
 }
 
 func (a *Authorizer) GetDefaultNamespace(tenantID string) (string, error) {

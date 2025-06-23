@@ -172,11 +172,11 @@ func TestAuthorizeWithAttributes_TimeBasedAccess(t *testing.T) {
 		Tenant:    "tenant1",
 		Resource:  "resourceA",
 		Action:    "GET",
+		Attributes: map[string]any{
+			"time": time.Date(2023, 10, 10, 20, 0, 0, 0, time.UTC), // Outside allowed hours
+		},
 	}
-	attributes := map[string]any{
-		"time": time.Date(2023, 10, 10, 20, 0, 0, 0, time.UTC), // Outside allowed hours
-	}
-	authorized := authorizer.Authorize(request, attributes)
+	authorized := authorizer.Authorize(request)
 	if authorized {
 		t.Errorf("Expected authorization denied due to time-based restriction, got true")
 	}
