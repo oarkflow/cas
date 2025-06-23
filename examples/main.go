@@ -100,6 +100,11 @@ func main() {
 	}
 	authorizedWithAttrsNoPrincipal := authorizer.Authorize(attrReqNoPrincipal, map[string]any{"owner_id": "21890"})
 	fmt.Println("AuthorizeWithAttributes (no principal, should be false):", authorizedWithAttrsNoPrincipal)
+
+	err = LoadPermissions(authorizer)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func LoadPermissions(auth *cas.Authorizer) error {

@@ -3,7 +3,6 @@ package cas
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"slices"
 	"strings"
@@ -378,16 +377,89 @@ type ABACFunc func(request Request, attributes map[string]any) (bool, error)
 
 // RegisterABAC registers an ABAC (attribute-based access control) hook.
 // The hook is called before RBAC checks. If any hook returns false or error, access is denied.
-func (a *Authorizer) RegisterABAC(name string, hook ABACFunc) {
-	if a.abacHooks == nil {
-		a.abacHooks = make(map[string]ABACFunc)
+func (a *Authorizer) RegisterABAC(hook ABACFunc) {
+	a.abacHooks = append(a.abacHooks, hook)
+}
+
+func (a *Authorizer) ClearABACHooks() {
+	a.abacHooks = nil
+}
+
+func (a *Authorizer) ListABACHooks() []ABACFunc {
+	return a.abacHooks
+}
+
+// to list all ABAC hooks with their indices.
+func (a *Authorizer) ListABACHooksWithIndices() []struct {
+	Index int
+	Hook  ABACFunc
+} {
+	hooks := make([]struct {
+		Index int
+		Hook  ABACFunc
+	}, len(a.abacHooks))
+	for i, hook := range a.abacHooks {
+		hooks[i] = struct {
+			Index int
+			Hook  ABACFunc
+		}{Index: i, Hook: hook}
 	}
-	if _, exists := a.abacHooks[name]; exists {
-		log.Printf("ABAC hook with name %s already exists, overwriting", name)
+	return hooks
+}
+
+func (a *Authorizer) ClearExpiredCacheEntries() {
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	now := time.Now()
+	for key, entry := range a.permCache.data {
+		if now.After(entry.Expiration) {
+			delete(a.permCache.data, key)
+		}
 	}
-	if hook != nil {
-		a.abacHooks[name] = hook
+	for key, entry := range a.roleCache.data {
+		if now.After(entry.Expiration) {
+			delete(a.roleCache.data, key)
+		}
 	}
+}
+
+// to validate the structure of the Role DAG for consistency.
+func (dag *RoleDAG) ValidateStructure() error {
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+	for role, children := range dag.edges {
+		if _, exists := dag.roles[role]; !exists {
+			return fmt.Errorf("role %s does not exist in DAG", role)
+		}
+		for _, child := range children {
+			if _, exists := dag.roles[child]; !exists {
+				return fmt.Errorf("child role %s does not exist in DAG", child)
+			}
+		}
+	}
+	return nil
+}
+
+// to retrieve all permissions for a given principal across all tenants.
+func (a *Authorizer) GetAllPermissionsForPrincipal(userID string) (map[string]struct{}, error) {
+	permissions := make(map[string]struct{})
+	a.tenantsMU.RLock()
+	defer a.tenantsMU.RUnlock()
+	for _, tenant := range a.tenants {
+		for _, userRole := range a.userRoleMap[userID][tenant.ID] {
+			if userRole.IsExpired(a.clock) {
+				continue
+			}
+			perms := a.roleDAG.ResolvePermissions(userRole.Role)
+			for perm := range perms {
+				permissions[perm] = struct{}{}
+			}
+		}
+	}
+	if len(permissions) == 0 {
+		return nil, fmt.Errorf("no permissions found for principal %s", userID)
+	}
+	return permissions, nil
 }
 
 type Authorizer struct {
@@ -403,7 +475,7 @@ type Authorizer struct {
 	tenantsMU          sync.RWMutex
 	userRolesMU        sync.RWMutex
 	cacheLock          sync.RWMutex
-	abacHooks          map[string]ABACFunc
+	abacHooks          []ABACFunc
 	permCache          *LRUCache
 	roleCache          *LRUCache
 	effectiveRoleCache map[cacheKey]map[string]struct{}
@@ -869,15 +941,7 @@ func (a *Authorizer) Authorize(request Request, attrs ...map[string]any) bool {
 //
 //	authorizer := cas.NewAuthorizer()
 //	authorizer.RegisterABAC(func(req cas.Request, attrs map[string]any) (bool, error) {
-//	    var now time.Time
-//	    if attrs != nil {
-//	        if t, ok := attrs["time"].(time.Time); ok {
-//	            now = t
-//	        }
-//	    }
-//	    if now.IsZero() {
-//	        now = time.Now()
-//	    }
+//	    now := time.Now()
 //	    if now.Hour() < 9 || now.Hour() > 17 {
 //	        return false, nil // deny outside 9am-5pm
 //	    }
@@ -1234,4 +1298,83 @@ func (a *Authorizer) invalidateCache() {
 	defer a.cacheLock.Unlock()
 	a.permCache = NewLRUCache(1000, 5*time.Minute)
 	a.roleCache = NewLRUCache(1000, 5*time.Minute)
+}
+
+func (a *Authorizer) ClearCaches() {
+	a.cacheLock.Lock()
+	defer a.cacheLock.Unlock()
+	a.permCache = NewLRUCache(1000, 5*time.Minute)
+	a.roleCache = NewLRUCache(1000, 5*time.Minute)
+	a.effectiveCacheLock.Lock()
+	defer a.effectiveCacheLock.Unlock()
+	a.effectiveRoleCache = make(map[cacheKey]map[string]struct{})
+	a.effectivePermCache = make(map[cacheKey]map[string]struct{})
+}
+
+func (a *Authorizer) TenantExists(tenantID string) bool {
+	a.tenantsMU.RLock()
+	defer a.tenantsMU.RUnlock()
+	_, exists := a.tenants[tenantID]
+	return exists
+}
+
+func (a *Authorizer) NamespaceExists(tenantID, namespace string) bool {
+	tenant, ok := a.GetTenant(tenantID)
+	if !ok {
+		return false
+	}
+	tenant.m.RLock()
+	defer tenant.m.RUnlock()
+	_, exists := tenant.Namespaces[namespace]
+	return exists
+}
+
+func (a *Authorizer) ScopeExists(tenantID, namespace, scopeName string) bool {
+	tenant, ok := a.GetTenant(tenantID)
+	if !ok {
+		return false
+	}
+	tenant.m.RLock()
+	defer tenant.m.RUnlock()
+	ns, exists := tenant.Namespaces[namespace]
+	if !exists {
+		return false
+	}
+	_, exists = ns.Scopes[scopeName]
+	return exists
+}
+
+func (a *Authorizer) RemoveABACHook(index int) error {
+	if index < 0 || index >= len(a.abacHooks) {
+		return fmt.Errorf("invalid index")
+	}
+	a.abacHooks = append(a.abacHooks[:index], a.abacHooks[index+1:]...)
+	return nil
+}
+
+func (a *Authorizer) GetDefaultNamespace(tenantID string) (string, error) {
+	tenant, ok := a.GetTenant(tenantID)
+	if !ok {
+		return "", fmt.Errorf("tenant %s does not exist", tenantID)
+	}
+	tenant.m.RLock()
+	defer tenant.m.RUnlock()
+	return tenant.DefaultNS, nil
+}
+
+func (a *Authorizer) GetDefaultScope(tenantID, namespace string) (string, error) {
+	tenant, ok := a.GetTenant(tenantID)
+	if !ok {
+		return "", fmt.Errorf("tenant %s does not exist", tenantID)
+	}
+	tenant.m.RLock()
+	defer tenant.m.RUnlock()
+	ns, exists := tenant.Namespaces[namespace]
+	if !exists {
+		return "", fmt.Errorf("namespace %s does not exist in tenant %s", namespace, tenantID)
+	}
+	for scope := range ns.Scopes {
+		return scope, nil
+	}
+	return "", fmt.Errorf("no scopes found in namespace %s of tenant %s", namespace, tenantID)
 }
