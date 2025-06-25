@@ -17,6 +17,49 @@ import (
 
 //
 
+// Storage interface for loading CAS entities from any source (JSON, CSV, DB, etc.)
+type Storage interface {
+	LoadRoles() ([]*Role, error)
+	LoadTenants() ([]*Tenant, error)
+	LoadPermissions() ([]*Permission, error)
+	LoadAssignments() ([]*PrincipalRole, error)
+	LoadNamespaces() ([]*Namespace, error)
+	LoadScopes() ([]*Scope, error)
+	// Optionally: Load custom entities as needed
+}
+
+// EntityType represents the type of entity to load
+type EntityType string
+
+const (
+	EntityRoles       EntityType = "roles"
+	EntityTenants     EntityType = "tenants"
+	EntityPermissions EntityType = "permissions"
+	EntityAssignments EntityType = "assignments"
+	EntityNamespaces  EntityType = "namespaces"
+	EntityScopes      EntityType = "scopes"
+)
+
+// LoaderConfig holds the order and types of entities to load
+type LoaderConfig struct {
+	Order   []EntityType
+	Storage Storage
+}
+
+// Option to set storage backend
+func WithStorage(storage Storage) Options {
+	return func(a *Authorizer) {
+		a.loaderConfig.Storage = storage
+	}
+}
+
+// Option to set entity loading order
+func WithEntityLoadOrder(order []EntityType) Options {
+	return func(a *Authorizer) {
+		a.loaderConfig.Order = order
+	}
+}
+
 type Permission struct {
 	Resource string
 	Action   string
@@ -101,6 +144,15 @@ func NewTenant(id string, defaultNamespace ...string) *Tenant {
 		DefaultNS:    defaultNS,
 		Namespaces:   namespaces,
 		ChildTenants: make(map[string]*Tenant),
+	}
+}
+
+func (t *Tenant) Init() {
+	if t.Namespaces == nil {
+		t.Namespaces = make(map[string]*Namespace)
+	}
+	if t.ChildTenants == nil {
+		t.ChildTenants = make(map[string]*Tenant)
 	}
 }
 
@@ -230,6 +282,13 @@ func (c *LRUCache) Get(key cacheKey) (map[string]struct{}, bool) {
 func (c *LRUCache) Put(key cacheKey, value map[string]struct{}) {
 	c.cacheLock.Lock()
 	defer c.cacheLock.Unlock()
+	// Remove existing key from order if present
+	for i, k := range c.order {
+		if k == key {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
+		}
+	}
 	if len(c.data) >= c.capacity {
 		oldest := c.order[0]
 		c.order = c.order[1:]
@@ -242,11 +301,12 @@ func (c *LRUCache) Put(key cacheKey, value map[string]struct{}) {
 func (c *LRUCache) moveToEnd(key cacheKey) {
 	for i, k := range c.order {
 		if k == key {
+			// Remove the key from its current position
 			c.order = append(c.order[:i], c.order[i+1:]...)
-			c.order = append(c.order, key)
 			break
 		}
 	}
+	c.order = append(c.order, key)
 }
 
 type RoleDAG struct {
@@ -337,7 +397,11 @@ func (dag *RoleDAG) ResolvePermissions(roleName string) map[string]struct{} {
 		for perm := range role.Permissions {
 			result[perm] = struct{}{}
 		}
-		queue = append(queue, dag.edges[current]...)
+		for _, child := range dag.edges[current] {
+			if !visited[child] {
+				queue = append(queue, child)
+			}
+		}
 	}
 	dag.resolved[roleName] = result
 	return result
@@ -367,7 +431,11 @@ func (dag *RoleDAG) ResolveChildRoles(roleName string) map[string]struct{} {
 			continue
 		}
 		result[role.Name] = struct{}{}
-		queue = append(queue, dag.edges[current]...)
+		for _, child := range dag.edges[current] {
+			if !visited[child] {
+				queue = append(queue, child)
+			}
+		}
 	}
 	dag.resolvedRoles[roleName] = result
 	return result
@@ -380,6 +448,10 @@ type ABACFunc func(request Request, attributes map[string]any) (bool, error)
 // RegisterABAC registers an ABAC (attribute-based access control) hook.
 // The hook is called before RBAC checks. If any hook returns false or error, access is denied.
 func (a *Authorizer) RegisterABAC(name string, hook ABACFunc) {
+	if name == "" {
+		log.Printf("ABAC hook name cannot be empty")
+		return
+	}
 	if a.abacHooks == nil {
 		a.abacHooks = make(map[string]ABACFunc)
 	}
@@ -421,6 +493,7 @@ type Authorizer struct {
 	effectiveRoleCache map[cacheKey]map[string]struct{}
 	effectivePermCache map[cacheKey]map[string]struct{}
 	effectiveCacheLock sync.RWMutex
+	loaderConfig       LoaderConfig
 }
 
 type Options func(*Authorizer)
@@ -448,11 +521,80 @@ func NewAuthorizer(opts ...Options) *Authorizer {
 		roleCache:          NewLRUCache(1000, 5*time.Minute),
 		effectiveRoleCache: make(map[cacheKey]map[string]struct{}),
 		effectivePermCache: make(map[cacheKey]map[string]struct{}),
+		loaderConfig: LoaderConfig{
+			Order: []EntityType{
+				EntityRoles, EntityTenants, EntityNamespaces, EntityScopes, EntityPermissions, EntityAssignments,
+			},
+			Storage: nil,
+		},
 	}
 	for _, opt := range opts {
 		opt(auth)
 	}
 	return auth
+}
+
+// LoadEntities loads all entities from the configured storage in the configured order.
+func (a *Authorizer) LoadEntities() error {
+	if a.loaderConfig.Storage == nil {
+		return fmt.Errorf("no storage configured")
+	}
+	for _, entity := range a.loaderConfig.Order {
+		switch entity {
+		case EntityRoles:
+			roles, err := a.loaderConfig.Storage.LoadRoles()
+			if err != nil {
+				return fmt.Errorf("failed to load roles: %w", err)
+			}
+			a.AddRoles(roles...)
+		case EntityTenants:
+			tenants, err := a.loaderConfig.Storage.LoadTenants()
+			if err != nil {
+				return fmt.Errorf("failed to load tenants: %w", err)
+			}
+			a.AddTenants(tenants...)
+		case EntityNamespaces:
+			namespaces, err := a.loaderConfig.Storage.LoadNamespaces()
+			if err != nil {
+				return fmt.Errorf("failed to load namespaces: %w", err)
+			}
+			for _, ns := range namespaces {
+				if t, ok := a.GetTenant(ns.ID); ok {
+					t.AddNamespace(ns.ID)
+				}
+			}
+		case EntityScopes:
+			scopes, err := a.loaderConfig.Storage.LoadScopes()
+			if err != nil {
+				return fmt.Errorf("failed to load scopes: %w", err)
+			}
+			for _, sc := range scopes {
+				for _, t := range a.tenants {
+					for ns := range t.Namespaces {
+						t.AddScopeToNamespace(ns, sc)
+					}
+				}
+			}
+		case EntityPermissions:
+			perms, err := a.loaderConfig.Storage.LoadPermissions()
+			if err != nil {
+				return fmt.Errorf("failed to load permissions: %w", err)
+			}
+			for _, perm := range perms {
+				// Assume Permission.Category is role name
+				if role, ok := a.GetRole(perm.Category); ok {
+					role.AddPermission(perm)
+				}
+			}
+		case EntityAssignments:
+			assignments, err := a.loaderConfig.Storage.LoadAssignments()
+			if err != nil {
+				return fmt.Errorf("failed to load assignments: %w", err)
+			}
+			a.AddPrincipalRole(assignments...)
+		}
+	}
+	return nil
 }
 
 func (a *Authorizer) updateEffectiveCachesForRole(pr *PrincipalRole) {
@@ -489,6 +631,9 @@ func (a *Authorizer) AddPrincipalRole(userRole ...*PrincipalRole) {
 	a.userRolesMU.Lock()
 	defer a.userRolesMU.Unlock()
 	for _, ur := range userRole {
+		if ur == nil {
+			continue
+		}
 		a.userRoles = append(a.userRoles, ur)
 		if a.userRoleMap[ur.Principal] == nil {
 			a.userRoleMap[ur.Principal] = make(map[string][]*PrincipalRole)
@@ -792,22 +937,29 @@ func (a *Authorizer) Can(request Request, roles ...string) bool {
 	return false
 }
 
-func (a *Authorizer) Authorize(request Request) bool {
-	if len(request.Attributes) > 0 {
+func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[string]any) bool {
+	// Only call ABAC hooks with provided attributes
+	if len(a.abacHooks) > 0 {
 		for _, hook := range a.abacHooks {
-			allow, err := hook(request, request.Attributes)
+			allow, err := hook(request, attributes)
 			if err != nil || !allow {
 				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
 				return false
 			}
 		}
 	}
-	// ABAC hooks: called with nil attributes for backward compatibility
-	for _, hook := range a.abacHooks {
-		allow, err := hook(request, nil)
-		if err != nil || !allow {
-			a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
-			return false
+	return a.Authorize(request)
+}
+
+func (a *Authorizer) Authorize(request Request) bool {
+	// Only call ABAC hooks if attributes are present
+	if len(request.Attributes) > 0 && len(a.abacHooks) > 0 {
+		for _, hook := range a.abacHooks {
+			allow, err := hook(request, request.Attributes)
+			if err != nil || !allow {
+				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
+				return false
+			}
 		}
 	}
 	targetTenants, isValidTenant := a.FindTargetTenants(request)
@@ -962,9 +1114,15 @@ func (a *Authorizer) AddTenant(tenant *Tenant) *Tenant {
 	a.tenants[tenant.ID] = tenant
 	a.cacheLock.Lock()
 	defer a.cacheLock.Unlock()
-	for _, child := range tenant.ChildTenants {
-		a.parentCache[child.ID] = tenant
+	// Recursively update parentCache for all descendants
+	var updateParentCache func(parent *Tenant)
+	updateParentCache = func(parent *Tenant) {
+		for _, child := range parent.ChildTenants {
+			a.parentCache[child.ID] = parent
+			updateParentCache(child)
+		}
 	}
+	updateParentCache(tenant)
 	return tenant
 }
 
@@ -1207,6 +1365,14 @@ func (t *Tenant) AddChildTenantWithInheritance(tenant *Tenant, inheritRoles bool
 			}
 		}
 	}
+}
+
+func (a *Authorizer) RemoveAllTenants() {
+	a.tenantsMU.Lock()
+	defer a.tenantsMU.Unlock()
+	a.tenants = make(map[string]*Tenant)
+	a.parentCache = make(map[string]*Tenant)
+	a.invalidateCache()
 }
 
 func (a *Authorizer) ListTenants() []*Tenant {
