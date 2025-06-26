@@ -932,18 +932,25 @@ func (a *Authorizer) Can(request Request, roles ...string) bool {
 	return false
 }
 
-func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[string]any) bool {
-	// Always call ABAC hooks if registered, passing attributes (may be nil)
-	if len(a.abacHooks) > 0 {
-		for _, hook := range a.abacHooks {
-			allow, err := hook(request, attributes)
-			if err != nil || !allow {
-				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
-				return false
-			}
-		}
+func (a *Authorizer) AuthorizeContext(ctx context.Context) bool {
+	principal, _ := ctx.Value("principal").(string)
+	tenant, _ := ctx.Value("tenant").(string)
+	namespace, _ := ctx.Value("namespace").(string)
+	scope, _ := ctx.Value("scope").(string)
+	resource, _ := ctx.Value("resource").(string)
+	action, _ := ctx.Value("action").(string)
+	attributes, _ := ctx.Value("attributes").(map[string]any)
+
+	req := Request{
+		Principal:  principal,
+		Tenant:     tenant,
+		Namespace:  namespace,
+		Scope:      scope,
+		Resource:   resource,
+		Action:     action,
+		Attributes: attributes,
 	}
-	return a.Authorize(request)
+	return a.Authorize(req)
 }
 
 func (a *Authorizer) Authorize(request Request) bool {
