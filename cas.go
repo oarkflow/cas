@@ -13,10 +13,6 @@ import (
 	"github.com/oarkflow/cas/utils"
 )
 
-//
-
-//
-
 // Storage interface for loading CAS entities from any source (JSON, CSV, DB, etc.)
 type Storage interface {
 	LoadRoles() ([]*Role, error)
@@ -25,7 +21,6 @@ type Storage interface {
 	LoadAssignments() ([]*PrincipalRole, error)
 	LoadNamespaces() ([]*Namespace, error)
 	LoadScopes() ([]*Scope, error)
-	// Optionally: Load custom entities as needed
 }
 
 // EntityType represents the type of entity to load
@@ -537,7 +532,7 @@ func NewAuthorizer(opts ...Options) *Authorizer {
 // LoadEntities loads all entities from the configured storage in the configured order.
 func (a *Authorizer) LoadEntities() error {
 	if a.loaderConfig.Storage == nil {
-		return fmt.Errorf("no storage configured")
+		return nil
 	}
 	for _, entity := range a.loaderConfig.Order {
 		switch entity {
@@ -938,7 +933,7 @@ func (a *Authorizer) Can(request Request, roles ...string) bool {
 }
 
 func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[string]any) bool {
-	// Only call ABAC hooks with provided attributes
+	// Always call ABAC hooks if registered, passing attributes (may be nil)
 	if len(a.abacHooks) > 0 {
 		for _, hook := range a.abacHooks {
 			allow, err := hook(request, attributes)
@@ -952,8 +947,7 @@ func (a *Authorizer) AuthorizeWithAttributes(request Request, attributes map[str
 }
 
 func (a *Authorizer) Authorize(request Request) bool {
-	// Only call ABAC hooks if attributes are present
-	if len(request.Attributes) > 0 && len(a.abacHooks) > 0 {
+	if len(a.abacHooks) > 0 {
 		for _, hook := range a.abacHooks {
 			allow, err := hook(request, request.Attributes)
 			if err != nil || !allow {
