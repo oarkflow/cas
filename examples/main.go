@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/oarkflow/cas"
@@ -20,27 +21,32 @@ func main() {
 	if err := auth.LoadEntities(); err != nil {
 		panic(err)
 	}
-	auth.RegisterABAC("checkPrincipal", func(req cas.Request, attrs map[string]any) (bool, error) {
-		if attrs == nil {
+	auth.RegisterABAC("checkPrincipal", func(ctx cas.Context) (bool, error) {
+		attrs := ctx.Attributes()
+		req := ctx.Request()
+		if len(attrs) == 0 {
 			return req.Principal == "21890", nil
 		}
 		return true, nil
 	})
-	auth.RegisterABAC("checkBusinessHour", func(req cas.Request, attrs map[string]any) (bool, error) {
-		if attrs == nil {
+	auth.RegisterABAC("checkBusinessHour", func(ctx cas.Context) (bool, error) {
+		attrs := ctx.Attributes()
+		if len(attrs) == 0 {
 			hour := 10
 			return hour >= 9 && hour <= 17, nil
 		}
 		return true, nil
 	})
-	auth.RegisterABAC("checkOwner", func(req cas.Request, attrs map[string]any) (bool, error) {
-		if attrs == nil {
+	auth.RegisterABAC("checkOwner", func(ctx cas.Context) (bool, error) {
+		attrs := ctx.Attributes()
+		req := ctx.Request()
+		if len(attrs) == 0 {
 			return true, nil
 		}
 		return attrs["owner_id"] == req.Principal, nil
 	})
 	test := func(label string, req cas.Request, expected bool) {
-		res := auth.Authorize(req)
+		res := auth.Authorize(context.Background(), req)
 		fmt.Printf("%s (should be %v): %v\n", label, expected, res)
 	}
 	fmt.Println("== ABAC Only (no attributes) ==")

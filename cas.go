@@ -436,9 +436,44 @@ func (dag *RoleDAG) ResolveChildRoles(roleName string) map[string]struct{} {
 	return result
 }
 
+type Context interface {
+	Request() Request
+	UserContext() context.Context
+	Attributes() map[string]any
+}
+
+type Ctx struct {
+	request     Request
+	userContext context.Context
+	attributes  map[string]any
+}
+
+func NewCtx(request Request, userContext context.Context, attributes map[string]any) *Ctx {
+	return &Ctx{
+		request:     request,
+		userContext: userContext,
+		attributes:  attributes,
+	}
+}
+
+func (c *Ctx) Request() Request {
+	return c.request
+}
+
+func (c *Ctx) UserContext() context.Context {
+	return c.userContext
+}
+
+func (c *Ctx) Attributes() map[string]any {
+	if c.attributes == nil {
+		return make(map[string]any)
+	}
+	return c.attributes
+}
+
 // ABACFunc defines the signature for ABAC hooks.
 // It returns (allow, error). If allow is false or error is non-nil, access is denied.
-type ABACFunc func(request Request, attributes map[string]any) (bool, error)
+type ABACFunc func(Context) (bool, error)
 
 // RegisterABAC registers an ABAC (attribute-based access control) hook.
 // The hook is called before RBAC checks. If any hook returns false or error, access is denied.
@@ -950,13 +985,14 @@ func (a *Authorizer) AuthorizeContext(ctx context.Context) bool {
 		Action:     action,
 		Attributes: attributes,
 	}
-	return a.Authorize(req)
+	return a.Authorize(ctx, req)
 }
 
-func (a *Authorizer) Authorize(request Request) bool {
+func (a *Authorizer) Authorize(ctx context.Context, request Request) bool {
+	ctxx := NewCtx(request, ctx, request.Attributes)
 	if len(a.abacHooks) > 0 {
 		for _, hook := range a.abacHooks {
-			allow, err := hook(request, request.Attributes)
+			allow, err := hook(ctxx)
 			if err != nil || !allow {
 				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
 				return false
