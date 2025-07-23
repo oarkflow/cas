@@ -1,0 +1,184 @@
+[
+	{
+		"category": null,
+		"role_id": 23,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 6,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 18,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": "backend",
+		"role_id": 4,
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/save",
+		"service_feature_id": 13
+	},
+	{
+		"category": null,
+		"role_id": 16,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 12,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 20,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 17,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 21,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 25,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 22,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 15,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 5,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": "component",
+		"role_id": 1,
+		"route_method": "",
+		"route_uri": "open_count",
+		"service_feature_id": 51
+	},
+	{
+		"category": null,
+		"role_id": 11,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": "backend",
+		"role_id": 4,
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/review",
+		"service_feature_id": 12
+	},
+	{
+		"category": null,
+		"role_id": 19,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 9,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 8,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 2,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": "backend",
+		"role_id": 1,
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/:eid/start-coding",
+		"service_feature_id": 19
+	},
+	{
+		"category": "component",
+		"role_id": 1,
+		"route_method": "",
+		"route_uri": "in_progress_count",
+		"service_feature_id": 52
+	},
+	{
+		"category": null,
+		"role_id": 14,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 3,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 7,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	},
+	{
+		"category": null,
+		"role_id": 10,
+		"route_method": null,
+		"route_uri": null,
+		"service_feature_id": null
+	}
+]

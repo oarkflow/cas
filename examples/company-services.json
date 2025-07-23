@@ -1,0 +1,47 @@
+[
+	{
+		"company_id": 9,
+		"parent_company_id": null,
+		"service_id": 2
+	},
+	{
+		"company_id": 1,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 2,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 3,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 4,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 5,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 6,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 7,
+		"parent_company_id": 9,
+		"service_id": 2
+	},
+	{
+		"company_id": 8,
+		"parent_company_id": 9,
+		"service_id": 2
+	}
+]

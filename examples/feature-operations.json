@@ -1,0 +1,380 @@
+[
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/add-new-encounter-start-coding"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/add-new-encounter"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/coding/facilities/info"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/admin/facilities"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/bulk-delete"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "work_item_id",
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/review"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "work_item_id",
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/save"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "work_item_id",
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/:cid/update"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "GET",
+		"route_uri": "/web/client/coding/:wid/:eid/patient-details"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/coding/in-progress-count"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/coding/de-in-progress-count"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/:eid/save-patient-details"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/:eid/start-coding"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/:eid/suspend"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "work_item_id",
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/suspend_reasons"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/encounter/:wid"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "GET",
+		"route_uri": "/web/client/coding/workitem/:wid"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/cpt-code/create"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/cpt-code/"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/cpt-code/:id"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/cpts/"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "GET",
+		"route_uri": "/web/client/facility/:wid/providers"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/metadata/rules"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/provider/types"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "work_item_id",
+		"route_method": "POST",
+		"route_uri": "/web/client/provider/review"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/provider/save"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/provider/"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/provider/:pid/info"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/workitem/types"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/workitem/types"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/workitem/"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "POST",
+		"route_uri": "/web/client/workitem/:wid/settings"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "GET",
+		"route_uri": "/web/client/workitem/:wid/description"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/workitem/"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/web/client/workitem/:cid/workitems"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/feature-operations"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/feature-operations"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/users/store"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "GET",
+		"route_uri": "/web/client/charge-code/:wid/get-effective-date"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": "param.wid",
+		"route_method": "POST",
+		"route_uri": "/web/client/charge-code/:wid/review-charge-code-list"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "open_count"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/users/roles/assign"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/companies"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/companies"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/companies/:id"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "GET",
+		"route_uri": "/companies/:id"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "in_progress_count"
+	},
+	{
+		"category": "page",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "facilities"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "qa_count"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "qa_in_progress_count"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "data_entry_count"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "data_entry_in_progress_count"
+	},
+	{
+		"category": "component",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "",
+		"route_uri": "suspended_count"
+	},
+	{
+		"category": "backend",
+		"entity": null,
+		"model_id_placeholder": null,
+		"route_method": "POST",
+		"route_uri": "/web/client/coding/:wid/add-new-encounter"
+	}
+]
