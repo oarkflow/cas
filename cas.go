@@ -17,6 +17,12 @@ type Storage interface {
 	LoadAssignments() ([]*PrincipalRole, error)
 	LoadNamespaces() ([]*Namespace, error)
 	LoadScopes() ([]*Scope, error)
+	SaveRoles([]*Role) error
+	SaveTenants([]*Tenant) error
+	SavePermissions([]*Permission) error
+	SaveAssignments([]*PrincipalRole) error
+	SaveNamespaces([]*Namespace) error
+	SaveScopes([]*Scope) error
 }
 
 // EntityType represents the type of entity to load
@@ -357,6 +363,36 @@ func (dag *RoleDAG) checkCircularDependency(parent string, children ...string) e
 	for _, child := range children {
 		if dfs(child) {
 			return fmt.Errorf("circular role dependency detected: %s -> %s", parent, child)
+		}
+	}
+	return nil
+}
+
+// ValidateRoles checks for circular dependencies in the role DAG.
+func (dag *RoleDAG) ValidateRoles() error {
+	visited := make(map[string]bool)
+	recStack := make(map[string]bool)
+	var dfs func(string) error
+	dfs = func(role string) error {
+		visited[role] = true
+		recStack[role] = true
+		for _, child := range dag.edges[role] {
+			if !visited[child] {
+				if err := dfs(child); err != nil {
+					return err
+				}
+			} else if recStack[child] {
+				return fmt.Errorf("circular dependency detected involving %s", role)
+			}
+		}
+		recStack[role] = false
+		return nil
+	}
+	for role := range dag.roles {
+		if !visited[role] {
+			if err := dfs(role); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

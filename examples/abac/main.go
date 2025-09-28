@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/oarkflow/cas"
-	"github.com/oarkflow/cas/examples/storage"
+	"github.com/oarkflow/cas/storage"
 )
 
 func main() {

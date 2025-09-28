@@ -43,7 +43,14 @@ func MatchResource(value, pattern string) bool {
 
 	// If pattern includes a method, require it
 	if len(patParts) == 2 {
-		if len(valParts) != 2 || valParts[0] != patParts[0] {
+		if len(valParts) != 2 {
+			return false
+		}
+		// Special case for wildcard
+		if patParts[0] == "*" && patParts[1] == "*" {
+			return true
+		}
+		if patParts[0] != "*" && valParts[0] != patParts[0] {
 			return false
 		}
 		// Match URI part

@@ -269,6 +269,20 @@ func TestHierarchicalTenancy(t *testing.T) {
 	}
 }
 
+func TestValidate(t *testing.T) {
+	auth := setupAuthorizer(true)
+	err := auth.Validate()
+	if err != nil {
+		t.Errorf("Expected no validation errors, got %v", err)
+	}
+	// Add invalid role
+	auth.AddPrincipalRole(&PrincipalRole{Principal: "", Tenant: "tenant1", Role: "role1"})
+	err = auth.Validate()
+	if err == nil {
+		t.Errorf("Expected validation error for invalid principal role")
+	}
+}
+
 func setupAuthorizer(defaultDeny bool) *Authorizer {
 	authorizer := NewAuthorizer(WithDefaultDeny(defaultDeny))
 	role := NewRole("role1")

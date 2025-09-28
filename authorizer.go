@@ -2,9 +2,11 @@ package cas
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -443,11 +445,13 @@ func (a *Authorizer) Can(request Request, roles ...string) bool {
 		for role := range resolvedRoles {
 			if slices.Contains(roles, role) {
 				a.Log(slog.LevelWarn, request, "Authorization granted")
+				metricAuthorizations++
 				return true
 			}
 		}
 	}
 	a.Log(slog.LevelWarn, request, "Authorization failed")
+	metricDenials++
 	return false
 }
 
@@ -479,6 +483,7 @@ func (a *Authorizer) Authorize(ctx context.Context, request Request) bool {
 			allow, err := hook(ctxx)
 			if err != nil || !allow {
 				a.Log(slog.LevelWarn, request, "Authorization denied by ABAC hook")
+				metricDenials++
 				return false
 			}
 		}
@@ -526,6 +531,7 @@ func (a *Authorizer) Authorize(ctx context.Context, request Request) bool {
 				deniedPattern := strings.TrimPrefix(perm, "DENY:")
 				if utils.MatchResource(request.String(), deniedPattern) {
 					a.Log(slog.LevelWarn, request, "Authorization denied by explicit DENY")
+					metricDenials++
 					return false
 				}
 			}
@@ -536,15 +542,18 @@ func (a *Authorizer) Authorize(ctx context.Context, request Request) bool {
 			}
 			if utils.MatchResource(request.String(), perm) {
 				a.Log(slog.LevelWarn, request, "Authorization granted")
+				metricAuthorizations++
 				return true
 			}
 		}
 	}
 	if a.defaultDeny {
 		a.Log(slog.LevelWarn, request, "Authorization failed")
+		metricDenials++
 		return false
 	}
 	a.Log(slog.LevelWarn, request, "Authorization granted by default because ResourceAction doesn't exist")
+	metricAuthorizations++
 	return true
 }
 
@@ -881,13 +890,50 @@ func (a *Authorizer) CleanExpiredPrincipalRoles() {
 	a.invalidateCache()
 }
 
+// PolicyData represents the exportable policy data.
+type PolicyData struct {
+	Roles       []*Role          `json:"roles"`
+	Tenants     []*Tenant        `json:"tenants"`
+	Assignments []*PrincipalRole `json:"assignments"`
+}
+
+// ExportPolicies exports all policies as JSON.
+func (a *Authorizer) ExportPolicies() ([]byte, error) {
+	data := PolicyData{
+		Roles:       a.ListRoles(),
+		Tenants:     a.ListTenants(),
+		Assignments: a.ListAssignments(),
+	}
+	return json.MarshalIndent(data, "", "  ")
+}
+
+// ImportPolicies imports policies from JSON.
+func (a *Authorizer) ImportPolicies(data []byte) error {
+	var pd PolicyData
+	if err := json.Unmarshal(data, &pd); err != nil {
+		return err
+	}
+	for _, role := range pd.Roles {
+		a.AddRole(role)
+	}
+	for _, tenant := range pd.Tenants {
+		a.AddTenant(tenant)
+	}
+	for _, assign := range pd.Assignments {
+		a.AddPrincipalRole(assign)
+	}
+	return nil
+}
+
 var (
 	metricResolutionCount = 0
 	metricCacheHits       = 0
+	metricAuthorizations  = 0
+	metricDenials         = 0
 )
 
 func (a *Authorizer) LogMetrics() {
-	fmt.Printf("Resolution Count: %d, Cache Hits: %d\n", metricResolutionCount, metricCacheHits)
+	fmt.Printf("Resolution Count: %d, Cache Hits: %d, Total Authorizations: %d, Denials: %d\n", metricResolutionCount, metricCacheHits, metricAuthorizations, metricDenials)
 }
 
 // ABACFunc defines the signature for ABAC hooks.
@@ -920,5 +966,139 @@ func (a *Authorizer) RemoveABAC(name string) {
 		delete(a.abacHooks, name)
 	} else {
 		log.Printf("ABAC hook with name %s does not exist", name)
+	}
+}
+
+// SaveEntities saves all entities to the configured storage in the configured order.
+func (a *Authorizer) SaveEntities() error {
+	if a.loaderConfig.Storage == nil {
+		return nil
+	}
+	for _, entity := range a.loaderConfig.Order {
+		switch entity {
+		case EntityRoles:
+			roles := a.ListRoles()
+			if err := a.loaderConfig.Storage.SaveRoles(roles); err != nil {
+				return fmt.Errorf("failed to save roles: %w", err)
+			}
+		case EntityTenants:
+			tenants := a.ListTenants()
+			if err := a.loaderConfig.Storage.SaveTenants(tenants); err != nil {
+				return fmt.Errorf("failed to save tenants: %w", err)
+			}
+		case EntityNamespaces:
+			var namespaces []*Namespace
+			for _, t := range a.tenants {
+				for _, ns := range t.Namespaces {
+					namespaces = append(namespaces, ns)
+				}
+			}
+			if err := a.loaderConfig.Storage.SaveNamespaces(namespaces); err != nil {
+				return fmt.Errorf("failed to save namespaces: %w", err)
+			}
+		case EntityScopes:
+			var scopes []*Scope
+			for _, t := range a.tenants {
+				for _, ns := range t.Namespaces {
+					for _, sc := range ns.Scopes {
+						scopes = append(scopes, sc)
+					}
+				}
+			}
+			if err := a.loaderConfig.Storage.SaveScopes(scopes); err != nil {
+				return fmt.Errorf("failed to save scopes: %w", err)
+			}
+		case EntityPermissions:
+			var perms []*Permission
+			for _, r := range a.roleDAG.roles {
+				for p := range r.Permissions {
+					// Parse permission string back to Permission
+					parts := strings.SplitN(p, " ", 2)
+					if len(parts) == 2 {
+						perms = append(perms, &Permission{Resource: parts[1], Action: parts[0], Category: r.Name})
+					}
+				}
+			}
+			if err := a.loaderConfig.Storage.SavePermissions(perms); err != nil {
+				return fmt.Errorf("failed to save permissions: %w", err)
+			}
+		case EntityAssignments:
+			assignments := a.ListAssignments()
+			if err := a.loaderConfig.Storage.SaveAssignments(assignments); err != nil {
+				return fmt.Errorf("failed to save assignments: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// Validate checks the integrity of the authorization setup.
+func (a *Authorizer) Validate() error {
+	// Check for circular role dependencies
+	if err := a.roleDAG.ValidateRoles(); err != nil {
+		return fmt.Errorf("role validation failed: %w", err)
+	}
+	// Check tenants
+	for _, tenant := range a.tenants {
+		if tenant.ID == "" {
+			return fmt.Errorf("tenant with empty ID")
+		}
+		if tenant.Status < TenantStatusActive || tenant.Status > TenantStatusBanned {
+			return fmt.Errorf("tenant %s has invalid status", tenant.ID)
+		}
+	}
+	// Check user roles
+	for _, pr := range a.userRoles {
+		if pr.Principal == "" || pr.Tenant == "" || pr.Role == "" {
+			return fmt.Errorf("invalid principal role: %+v", pr)
+		}
+		if _, exists := a.tenants[pr.Tenant]; !exists {
+			return fmt.Errorf("principal role references non-existent tenant: %s", pr.Tenant)
+		}
+		if !a.RoleExists(pr.Role) {
+			return fmt.Errorf("principal role references non-existent role: %s", pr.Role)
+		}
+	}
+	return nil
+}
+
+// ForceAllow grants access regardless of policies.
+func (a *Authorizer) ForceAllow(request Request) bool {
+	a.Log(slog.LevelWarn, request, "Access forced allow by admin")
+	metricAuthorizations++
+	return true
+}
+
+// ForceDeny denies access regardless of policies.
+func (a *Authorizer) ForceDeny(request Request) bool {
+	a.Log(slog.LevelWarn, request, "Access forced deny by admin")
+	metricDenials++
+	return false
+}
+
+// Middleware returns an HTTP middleware function for authorization.
+func (a *Authorizer) Middleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			principal := r.Header.Get("X-Principal")
+			tenant := r.Header.Get("X-Tenant")
+			namespace := r.Header.Get("X-Namespace")
+			scope := r.Header.Get("X-Scope")
+			resource := r.URL.Path
+			action := r.Method
+			req := Request{
+				Principal: principal,
+				Tenant:    tenant,
+				Namespace: namespace,
+				Scope:     scope,
+				Resource:  resource,
+				Action:    action,
+			}
+			if !a.Authorize(r.Context(), req) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
