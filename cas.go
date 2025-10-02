@@ -609,3 +609,11 @@ func (t *Tenant) AddChildTenantWithInheritance(tenant *Tenant, inheritRoles bool
 		}
 	}
 }
+
+func (a *Authorizer) SetDefaultTenant(tenantID string) error {
+	if !a.TenantExists(tenantID) {
+		return fmt.Errorf("tenant %s does not exist", tenantID)
+	}
+	a.defaultTenant = tenantID
+	return nil
+}
